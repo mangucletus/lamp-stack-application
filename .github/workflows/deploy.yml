@@ -1,0 +1,74 @@
+# .github/workflows/deploy.yml
+
+name: Deploy to AWS Lightsail
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+        
+    - name: Get Lightsail instance IP
+      id: get-ip
+      run: |
+        INSTANCE_IP=$(aws lightsail get-static-ip --static-ip-name blog-server-static-ip --query 'staticIp.ipAddress' --output text)
+        echo "instance_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+        echo "Instance IP: $INSTANCE_IP"
+        
+    - name: Setup SSH key
+      run: |
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ssh_key.pem
+        chmod 600 ssh_key.pem
+        
+    - name: Test SSH connection
+      run: |
+        ssh-keyscan -H ${{ steps.get-ip.outputs.instance_ip }} >> ~/.ssh/known_hosts
+        ssh -i ssh_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ip.outputs.instance_ip }} "echo 'SSH connection successful'"
+        
+    - name: Deploy application
+      run: |
+        # Copy source files to server
+        scp -i ssh_key.pem -r src/ ubuntu@${{ steps.get-ip.outputs.instance_ip }}:/tmp/
+        
+        # Execute deployment commands on server
+        ssh -i ssh_key.pem ubuntu@${{ steps.get-ip.outputs.instance_ip }} << 'EOF'
+          # Copy files to web directory
+          sudo cp -r /tmp/src/* /var/www/html/
+          
+          # Update database password in PHP files
+          sudo sed -i "s/your_secure_password/${{ secrets.DB_PASSWORD }}/g" /var/www/html/index.php
+          
+          # Set proper permissions
+          sudo chown -R www-data:www-data /var/www/html
+          sudo chmod -R 755 /var/www/html
+          
+          # Test database connection
+          php /var/www/html/health.php
+          
+          echo "Deployment completed successfully!"
+        EOF
+        
+    - name: Health check
+      run: |
+        sleep 10
+        curl -f http://${{ steps.get-ip.outputs.instance_ip }}/health.php || exit 1
+        echo "Health check passed!"
+        
+    - name: Cleanup
+      run: |
+        rm -f ssh_key.pem

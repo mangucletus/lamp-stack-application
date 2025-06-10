@@ -1,0 +1,32 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+terraform.tfplan
+terraform.tar.gz
+.terraformrc
+
+# SSH Keys
+*.pem
+*.key
+id_rsa*
+
+# AWS credentials
+.aws/
+*.credentials
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
