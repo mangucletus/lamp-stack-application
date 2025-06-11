@@ -27,7 +27,7 @@ on:
 
 # Environment variables available to all jobs
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-west-1
   TERRAFORM_VERSION: 1.6.6
 
 jobs:
