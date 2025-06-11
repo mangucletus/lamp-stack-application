@@ -34,8 +34,8 @@ GitHub Repository → GitHub Actions → AWS Lightsail Instance
 
 ### Step 1: Clone and Setup Repository
 ```bash
-git clone <your-repo-url>
-cd simple-lamp-blog
+git https://github.com/mangucletus/lamp-stack-application.git
+cd lamp-stack-application
 ```
 
 ### Step 2: Configure AWS CLI
@@ -110,7 +110,7 @@ The GitHub Actions workflow automatically:
 ## 📁 Project Structure
 
 ```
-simple-lamp-blog/
+lamp-stack-application/
 ├── src/index.php           # Main application
 ├── terraform/              # Infrastructure code
 ├── .github/workflows/      # CI/CD pipeline
