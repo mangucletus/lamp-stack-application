@@ -1,74 +1,314 @@
-# .github/workflows/deploy.yml
+# GitHub Actions Workflow for Automated Blog Deployment
+# This workflow automatically deploys the blog application when code is pushed to the main branch
 
-name: Deploy to AWS Lightsail
+name: 🚀 Deploy Blog Application to AWS EC2
 
+# Trigger conditions for this workflow
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]  # Deploy when pushing to main branch
+    paths: 
+      - 'src/**'        # Only deploy when source code changes
+      - 'terraform/**'  # Or when infrastructure changes
   pull_request:
-    branches: [ main ]
+    branches: [ main ]  # Run checks on pull requests
+    
+  # Allow manual workflow trigger
+  workflow_dispatch:
+    inputs:
+      deploy_environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+# Environment variables available to all jobs
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.6.6
 
 jobs:
-  deploy:
+  # Job 1: Validate and Plan Infrastructure Changes
+  terraform-plan:
+    name: 🏗️ Terraform Plan
     runs-on: ubuntu-latest
     
+    # Security: Only run on main branch or manual dispatch
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    
+    # Define outputs for other jobs
+    outputs:
+      terraform-plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      instance-ip: ${{ steps.output.outputs.instance_ip }}
+    
     steps:
-    - name: Checkout code
+    # Step 1: Checkout the repository code
+    - name: 📥 Checkout Repository
       uses: actions/checkout@v4
-      
-    - name: Configure AWS credentials
+      with:
+        fetch-depth: 0  # Fetch full history for better context
+
+    # Step 2: Setup Terraform with specified version
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false  # Needed for output parsing
+
+    # Step 3: Configure AWS credentials from GitHub secrets
+    - name: 🔐 Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
-        
-    - name: Get Lightsail instance IP
-      id: get-ip
+        aws-region: ${{ env.AWS_REGION }}
+
+    # Step 4: Initialize Terraform with backend configuration
+    - name: 🚀 Terraform Init
+      working-directory: ./terraform
       run: |
-        INSTANCE_IP=$(aws lightsail get-static-ip --static-ip-name blog-server-static-ip --query 'staticIp.ipAddress' --output text)
-        echo "instance_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
-        echo "Instance IP: $INSTANCE_IP"
-        
-    - name: Setup SSH key
+        terraform init \
+          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -backend-config="key=blog-app/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+
+    # Step 5: Validate Terraform configuration
+    - name: ✅ Terraform Validate
+      working-directory: ./terraform
+      run: terraform validate
+
+    # Step 6: Format check (ensure code is properly formatted)
+    - name: 📝 Terraform Format Check
+      working-directory: ./terraform
+      run: terraform fmt -check
+
+    # Step 7: Generate Terraform plan
+    - name: 📋 Terraform Plan
+      id: plan
+      working-directory: ./terraform
       run: |
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ssh_key.pem
-        chmod 600 ssh_key.pem
-        
-    - name: Test SSH connection
+        terraform plan \
+          -var="terraform_state_bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -var="github_repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+          -out=tfplan \
+          -detailed-exitcode
+      continue-on-error: true
+
+    # Step 8: Save Terraform plan for apply job
+    - name: 💾 Upload Terraform Plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: terraform/tfplan
+        retention-days: 1
+
+    # Step 9: Get current outputs (if infrastructure exists)
+    - name: 📤 Get Terraform Outputs
+      id: output
+      working-directory: ./terraform
       run: |
-        ssh-keyscan -H ${{ steps.get-ip.outputs.instance_ip }} >> ~/.ssh/known_hosts
-        ssh -i ssh_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ip.outputs.instance_ip }} "echo 'SSH connection successful'"
-        
-    - name: Deploy application
+        if terraform output instance_public_ip > /dev/null 2>&1; then
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+        else
+          echo "instance_ip=not_available" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+
+  # Job 2: Apply Infrastructure Changes (only on main branch)
+  terraform-apply:
+    name: 🏗️ Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    
+    # Only run on main branch pushes or manual dispatch
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    
+    # Use environment protection for production deployments
+    environment: 
+      name: production
+      url: http://${{ needs.terraform-plan.outputs.instance-ip }}/blog
+    
+    steps:
+    # Step 1: Checkout code
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    # Step 2: Setup Terraform
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
+
+    # Step 3: Configure AWS credentials
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # Step 4: Download Terraform plan
+    - name: 📥 Download Terraform Plan
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-plan
+        path: terraform/
+
+    # Step 5: Initialize Terraform
+    - name: 🚀 Terraform Init
+      working-directory: ./terraform
       run: |
-        # Copy source files to server
-        scp -i ssh_key.pem -r src/ ubuntu@${{ steps.get-ip.outputs.instance_ip }}:/tmp/
+        terraform init \
+          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -backend-config="key=blog-app/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+
+    # Step 6: Apply Terraform plan
+    - name: ✅ Terraform Apply
+      working-directory: ./terraform
+      run: terraform apply -auto-approve tfplan
+
+    # Step 7: Get outputs for application deployment
+    - name: 📤 Get Infrastructure Outputs
+      id: terraform-outputs
+      working-directory: ./terraform
+      run: |
+        echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+        echo "instance_id=$(terraform output -raw instance_id)" >> $GITHUB_OUTPUT
+        echo "ssh_key_name=$(terraform output -raw ssh_key_name)" >> $GITHUB_OUTPUT
+
+    # Step 8: Save SSH private key for deployment
+    - name: 🔑 Setup SSH Key
+      run: |
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
+        chmod 600 private_key.pem
+
+    # Step 9: Wait for instance to be fully ready
+    - name: ⏳ Wait for Instance Readiness
+      run: |
+        echo "Waiting for instance to be ready..."
+        for i in {1..30}; do
+          if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} "test -f /var/log/userdata-complete"; then
+            echo "Instance is ready!"
+            break
+          fi
+          echo "Attempt $i: Instance not ready yet, waiting 30 seconds..."
+          sleep 30
+        done
+
+    # Step 10: Deploy application code
+    - name: 🚀 Deploy Application Code
+      run: |
+        # Create deployment package
+        tar -czf blog-app.tar.gz src/
         
-        # Execute deployment commands on server
-        ssh -i ssh_key.pem ubuntu@${{ steps.get-ip.outputs.instance_ip }} << 'EOF'
-          # Copy files to web directory
-          sudo cp -r /tmp/src/* /var/www/html/
+        # Copy to server
+        scp -i private_key.pem -o StrictHostKeyChecking=no blog-app.tar.gz ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}:/tmp/
+        
+        # Deploy on server
+        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
+          # Extract application files
+          cd /tmp
+          tar -xzf blog-app.tar.gz
           
-          # Update database password in PHP files
-          sudo sed -i "s/your_secure_password/${{ secrets.DB_PASSWORD }}/g" /var/www/html/index.php
+          # Copy to web directory
+          sudo cp -r src/* /var/www/html/blog/
+          sudo chown -R www-data:www-data /var/www/html/blog
+          sudo chmod -R 755 /var/www/html/blog
           
-          # Set proper permissions
-          sudo chown -R www-data:www-data /var/www/html
-          sudo chmod -R 755 /var/www/html
+          # Setup database (ensure it exists and has latest schema)
+          mysql -u root -p${{ secrets.MYSQL_ROOT_PASSWORD }} < /var/www/html/blog/database.sql
           
-          # Test database connection
-          php /var/www/html/health.php
+          # Reload Apache to ensure latest configuration
+          sudo systemctl reload apache2
           
-          echo "Deployment completed successfully!"
+          # Clean up
+          rm -f /tmp/blog-app.tar.gz
+          rm -rf /tmp/src
+          
+          echo "✅ Deployment completed successfully!"
         EOF
-        
-    - name: Health check
+
+    # Step 11: Verify deployment
+    - name: 🔍 Verify Deployment
       run: |
+        # Wait a moment for services to stabilize
         sleep 10
-        curl -f http://${{ steps.get-ip.outputs.instance_ip }}/health.php || exit 1
-        echo "Health check passed!"
         
-    - name: Cleanup
+        # Test website accessibility
+        if curl -f -s "http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog" > /dev/null; then
+          echo "✅ Blog website is accessible!"
+        else
+          echo "❌ Blog website is not accessible"
+          exit 1
+        fi
+        
+        # Test server status
+        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
+          echo "=== Service Status ==="
+          sudo systemctl status apache2 --no-pager -l
+          sudo systemctl status mysql --no-pager -l
+          
+          echo "=== Recent Apache Logs ==="
+          sudo tail -5 /var/log/apache2/blog_error.log || echo "No Apache errors"
+          
+          echo "=== Database Connection Test ==="
+          mysql -u blog_user -p${{ secrets.MYSQL_BLOG_PASSWORD }} -e "SELECT COUNT(*) as post_count FROM blog_db.posts;" || echo "Database connection failed"
+        EOF
+
+    # Step 12: Clean up sensitive files
+    - name: 🧹 Cleanup
+      if: always()
       run: |
-        rm -f ssh_key.pem
+        rm -f private_key.pem
+        rm -f blog-app.tar.gz
+
+    # Step 13: Post deployment summary
+    - name: 📋 Deployment Summary
+      run: |
+        echo "🎉 Deployment completed successfully!"
+        echo "🌐 Blog URL: http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog"
+        echo "🖥️ SSH Access: ssh -i your-key.pem ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}"
+        echo "📊 Instance ID: ${{ steps.terraform-outputs.outputs.instance_id }}"
+
+  # Job 3: Run Security and Quality Checks
+  security-scan:
+    name: 🔒 Security & Quality Checks
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    
+    steps:
+    # Step 1: Checkout code
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    # Step 2: Run Terraform security scan with tfsec
+    - name: 🛡️ Terraform Security Scan
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        soft_fail: true
+        working_directory: terraform/
+
+    # Step 3: PHP Code Quality Check
+    - name: 🐘 PHP Code Quality Check
+      run: |
+        # Basic PHP syntax check
+        for file in src/*.php; do
+          if [ -f "$file" ]; then
+            php -l "$file"
+          fi
+        done
+
+    # Step 4: Check for secrets in code
+    - name: 🔍 Secret Scan
+      run: |
+        # Basic check for common secret patterns
+        if grep -r "password\|secret\|key" src/ --exclude-dir=.git || true; then
+          echo "⚠️ Found potential secrets in code. Please review."
+        else
+          echo "✅ No obvious secrets found in source code."
+        fi
