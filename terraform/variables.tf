@@ -10,9 +10,9 @@ variable "aws_region" {
   description = "AWS region where all resources will be created"
   type        = string
   default     = "eu-west-1"
-  
+
   validation {
-    condition = can(regex("^[a-z]{2}-[a-z]+-[0-9]$", var.aws_region))
+    condition     = can(regex("^[a-z]{2}-[a-z]+-[0-9]$", var.aws_region))
     error_message = "AWS region must be in the format like 'eu-west-1'."
   }
 }
@@ -28,9 +28,9 @@ variable "instance_type" {
   description = "EC2 instance type (t3.micro recommended for testing, t3.small for production)"
   type        = string
   default     = "t3.micro"
-  
+
   validation {
-    condition = contains(["t3.micro", "t3.small", "t3.medium", "t2.micro", "t2.small"], var.instance_type)
+    condition     = contains(["t3.micro", "t3.small", "t3.medium", "t2.micro", "t2.small"], var.instance_type)
     error_message = "Instance type must be one of: t3.micro, t3.small, t3.medium, t2.micro, t2.small."
   }
 }
@@ -102,9 +102,9 @@ variable "environment" {
   description = "Environment name (dev, staging, prod)"
   type        = string
   default     = "production"
-  
+
   validation {
-    condition = contains(["dev", "staging", "production"], var.environment)
+    condition     = contains(["dev", "staging", "production"], var.environment)
     error_message = "Environment must be one of: dev, staging, production."
   }
 }

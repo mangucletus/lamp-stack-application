@@ -143,9 +143,9 @@ output "vpc_arn" {
 output "quick_access_summary" {
   description = "Quick reference for accessing your blog"
   value = {
-    blog_url      = "http://${aws_eip.blog_eip.public_ip}/blog"
-    ssh_access    = "ssh -i ${aws_key_pair.blog_keypair.key_name}.pem ubuntu@${aws_eip.blog_eip.public_ip}"
-    status_check  = "http://${aws_eip.blog_eip.public_ip}"
-    public_ip     = aws_eip.blog_eip.public_ip
+    blog_url     = "http://${aws_eip.blog_eip.public_ip}/blog"
+    ssh_access   = "ssh -i ${aws_key_pair.blog_keypair.key_name}.pem ubuntu@${aws_eip.blog_eip.public_ip}"
+    status_check = "http://${aws_eip.blog_eip.public_ip}"
+    public_ip    = aws_eip.blog_eip.public_ip
   }
 }

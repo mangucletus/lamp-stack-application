@@ -13,9 +13,9 @@
 # This provides an isolated network environment for our resources
 resource "aws_vpc" "blog_vpc" {
   cidr_block           = var.vpc_cidr
-  enable_dns_hostnames = true  # Enable DNS hostnames for instances
-  enable_dns_support   = true  # Enable DNS resolution
-  
+  enable_dns_hostnames = true # Enable DNS hostnames for instances
+  enable_dns_support   = true # Enable DNS resolution
+
   tags = {
     Name        = "${var.project_name}-vpc"
     Environment = var.environment
@@ -27,7 +27,7 @@ resource "aws_vpc" "blog_vpc" {
 # This allows our VPC to communicate with the internet
 resource "aws_internet_gateway" "blog_igw" {
   vpc_id = aws_vpc.blog_vpc.id
-  
+
   tags = {
     Name        = "${var.project_name}-igw"
     Environment = var.environment
@@ -41,8 +41,8 @@ resource "aws_subnet" "blog_public_subnet" {
   vpc_id                  = aws_vpc.blog_vpc.id
   cidr_block              = var.public_subnet_cidr
   availability_zone       = var.availability_zone
-  map_public_ip_on_launch = true  # Auto-assign public IP to instances
-  
+  map_public_ip_on_launch = true # Auto-assign public IP to instances
+
   tags = {
     Name        = "${var.project_name}-public-subnet"
     Environment = var.environment
@@ -55,13 +55,13 @@ resource "aws_subnet" "blog_public_subnet" {
 # This defines how traffic is routed within the VPC
 resource "aws_route_table" "blog_public_rt" {
   vpc_id = aws_vpc.blog_vpc.id
-  
+
   # Route for internet access via Internet Gateway
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.blog_igw.id
   }
-  
+
   tags = {
     Name        = "${var.project_name}-public-rt"
     Environment = var.environment
@@ -81,10 +81,10 @@ resource "aws_route_table_association" "blog_public_rt_association" {
 resource "aws_eip" "blog_eip" {
   instance = aws_instance.blog_server.id
   domain   = "vpc"
-  
+
   # Ensure the instance is created before creating the EIP
   depends_on = [aws_instance.blog_server]
-  
+
   tags = {
     Name        = "${var.project_name}-eip"
     Environment = var.environment
