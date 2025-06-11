@@ -45,7 +45,7 @@ variable "instance_name" {
 variable "ami_id" {
   description = "AMI ID for EC2 instance (Ubuntu 20.04 LTS recommended)"
   type        = string
-  default     = "ami-0d64bb532e0502c46" # Ubuntu 20.04 LTS in us-east-1
+  default     = "ami-0d64bb532e0502c46" # Ubuntu 20.04 LTS in eu-west-1
 }
 
 # SSH Key Configuration
