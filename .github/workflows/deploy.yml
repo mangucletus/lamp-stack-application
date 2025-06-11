@@ -1,4 +1,4 @@
-# GitHub Actions Workflow for Automated Blog Deployment
+# GitHub Actions Workflow for Automated Blog Deployment - CORRECTED VERSION
 # This workflow automatically deploys the blog application when code is pushed to the main branch
 
 name: 🚀 Deploy Blog Application to AWS EC2
@@ -187,44 +187,133 @@ jobs:
         echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
         chmod 600 private_key.pem
 
-    # Step 9: Wait for instance to be fully ready
+    # Step 9: Wait for instance to be fully ready (IMPROVED)
     - name: ⏳ Wait for Instance Readiness
       run: |
         echo "Waiting for instance to be ready..."
-        for i in {1..30}; do
-          if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} "test -f /var/log/userdata-complete"; then
-            echo "Instance is ready!"
-            break
+        max_attempts=40
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt/$max_attempts: Checking instance readiness..."
+          
+          # First check if SSH is available
+          if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} "echo 'SSH connection successful'" 2>/dev/null; then
+            echo "SSH connection established"
+            
+            # Then check if userdata script completed
+            if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} "test -f /var/log/userdata-complete" 2>/dev/null; then
+              echo "✅ Instance is ready - userdata script completed!"
+              
+              # Verify critical services
+              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
+                echo "=== Verifying Services ==="
+                systemctl is-active apache2 && echo "✅ Apache is running"
+                systemctl is-active mysql && echo "✅ MySQL is running"
+                [ -d "/var/www/html/blog" ] && echo "✅ Blog directory exists"
+                [ -f "/var/www/html/blog/index.php" ] && echo "✅ Blog files exist"
+              EOF
+              break
+            else
+              echo "Userdata script still running..."
+            fi
+          else
+            echo "SSH not yet available..."
           fi
-          echo "Attempt $i: Instance not ready yet, waiting 30 seconds..."
+          
+          echo "Waiting 30 seconds before next attempt..."
           sleep 30
+          ((attempt++))
         done
+        
+        if [ $attempt -gt $max_attempts ]; then
+          echo "❌ Timeout waiting for instance readiness"
+          echo "Checking current status..."
+          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} "tail -20 /var/log/userdata-setup.log" || echo "Could not retrieve userdata logs"
+          exit 1
+        fi
 
-    # Step 10: Deploy application code
+    # Step 10: Deploy application code (IMPROVED)
     - name: 🚀 Deploy Application Code
       run: |
+        echo "Starting application deployment..."
+        
         # Create deployment package
         tar -czf blog-app.tar.gz src/
+        echo "✅ Created deployment package"
         
         # Copy to server
         scp -i private_key.pem -o StrictHostKeyChecking=no blog-app.tar.gz ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}:/tmp/
+        echo "✅ Uploaded deployment package to server"
         
-        # Deploy on server
+        # Deploy on server with improved error handling
         ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
+          set -e
+          
+          echo "=== Starting deployment on server ==="
+          
           # Extract application files
           cd /tmp
-          tar -xzf blog-app.tar.gz
+          if [ -f "blog-app.tar.gz" ]; then
+            tar -xzf blog-app.tar.gz
+            echo "✅ Extracted deployment package"
+          else
+            echo "❌ Deployment package not found"
+            exit 1
+          fi
           
-          # Copy to web directory
-          sudo cp -r src/* /var/www/html/blog/
-          sudo chown -R www-data:www-data /var/www/html/blog
-          sudo chmod -R 755 /var/www/html/blog
+          # Ensure blog directory exists
+          BLOG_DIR="/var/www/html/blog"
+          if [ ! -d "$BLOG_DIR" ]; then
+            echo "Creating blog directory..."
+            sudo mkdir -p $BLOG_DIR
+          fi
           
-          # Setup database (ensure it exists and has latest schema)
-          mysql -u root -p${{ secrets.MYSQL_ROOT_PASSWORD }} < /var/www/html/blog/database.sql
+          # Copy files to web directory
+          if [ -d "src" ]; then
+            echo "Copying source files to $BLOG_DIR..."
+            sudo cp -r src/* $BLOG_DIR/
+            sudo chown -R www-data:www-data $BLOG_DIR
+            sudo chmod -R 755 $BLOG_DIR
+            echo "✅ Files copied successfully"
+          else
+            echo "❌ Source directory not found in deployment package"
+            ls -la
+            exit 1
+          fi
           
-          # Reload Apache to ensure latest configuration
-          sudo systemctl reload apache2
+          # Setup database if database.sql exists
+          if [ -f "$BLOG_DIR/database.sql" ]; then
+            echo "Setting up database..."
+            if mysql -u root -p'${{ secrets.MYSQL_ROOT_PASSWORD }}' < $BLOG_DIR/database.sql; then
+              echo "✅ Database setup completed"
+            else
+              echo "⚠️ Database setup failed, but continuing (may be expected if data exists)"
+            fi
+          else
+            echo "ℹ️ No database.sql file found, skipping database setup"
+          fi
+          
+          # Verify deployment
+          echo "=== Verifying deployment ==="
+          ls -la $BLOG_DIR/
+          
+          # Test Apache configuration
+          if sudo apache2ctl configtest; then
+            echo "✅ Apache configuration is valid"
+          else
+            echo "❌ Apache configuration has errors"
+            sudo apache2ctl configtest
+          fi
+          
+          # Reload Apache
+          if sudo systemctl reload apache2; then
+            echo "✅ Apache reloaded successfully"
+          else
+            echo "❌ Failed to reload Apache"
+            sudo systemctl status apache2
+            exit 1
+          fi
           
           # Clean up
           rm -f /tmp/blog-app.tar.gz
@@ -233,31 +322,91 @@ jobs:
           echo "✅ Deployment completed successfully!"
         EOF
 
-    # Step 11: Verify deployment
+    # Step 11: Verify deployment (IMPROVED)
     - name: 🔍 Verify Deployment
       run: |
-        # Wait a moment for services to stabilize
-        sleep 10
+        echo "=== Starting deployment verification ==="
+        
+        # Wait for services to stabilize
+        echo "Waiting for services to stabilize..."
+        sleep 15
         
         # Test website accessibility
-        if curl -f -s "http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog" > /dev/null; then
-          echo "✅ Blog website is accessible!"
-        else
-          echo "❌ Blog website is not accessible"
-          exit 1
-        fi
+        echo "Testing website accessibility..."
+        max_attempts=10
+        attempt=1
         
-        # Test server status
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt/$max_attempts: Testing http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog"
+          
+          if curl -f -s --max-time 10 "http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog" > /dev/null; then
+            echo "✅ Blog website is accessible!"
+            # Get the response to verify content
+            curl -s "http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog" | head -20
+            break
+          else
+            echo "❌ Blog website not accessible (attempt $attempt/$max_attempts)"
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Website accessibility test failed after $max_attempts attempts"
+              
+              # Debug information
+              echo "=== Debug Information ==="
+              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
+                echo "=== Service Status ==="
+                sudo systemctl status apache2 --no-pager -l
+                echo ""
+                echo "=== Apache Error Logs ==="
+                sudo tail -10 /var/log/apache2/error.log
+                echo ""
+                echo "=== Apache Access Logs ==="
+                sudo tail -5 /var/log/apache2/access.log
+                echo ""
+                echo "=== Blog Directory Contents ==="
+                ls -la /var/www/html/blog/
+                echo ""
+                echo "=== Apache Sites Enabled ==="
+                sudo apache2ctl -S
+                echo ""
+                echo "=== Test Local Access ==="
+                curl -I http://localhost/blog || echo "Local access failed"
+              EOF
+              
+              exit 1
+            fi
+            sleep 10
+          fi
+          ((attempt++))
+        done
+        
+        # Test server status and services
+        echo "=== Testing server status and services ==="
         ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }} << 'EOF'
           echo "=== Service Status ==="
-          sudo systemctl status apache2 --no-pager -l
-          sudo systemctl status mysql --no-pager -l
+          echo "Apache2: $(systemctl is-active apache2)"
+          echo "MySQL: $(systemctl is-active mysql)"
           
-          echo "=== Recent Apache Logs ==="
-          sudo tail -5 /var/log/apache2/blog_error.log || echo "No Apache errors"
-          
+          echo ""
           echo "=== Database Connection Test ==="
-          mysql -u blog_user -p${{ secrets.MYSQL_BLOG_PASSWORD }} -e "SELECT COUNT(*) as post_count FROM blog_db.posts;" || echo "Database connection failed"
+          if mysql -u blog_user -p'${{ secrets.MYSQL_BLOG_PASSWORD }}' -e "SELECT COUNT(*) as post_count FROM blog_db.posts;" 2>/dev/null; then
+            echo "✅ Database connection successful"
+          else
+            echo "❌ Database connection failed"
+          fi
+          
+          echo ""
+          echo "=== File Permissions Check ==="
+          ls -la /var/www/html/blog/ | head -10
+          
+          echo ""
+          echo "=== PHP Test ==="
+          php -v
+          
+          echo ""
+          echo "=== Recent Logs ==="
+          echo "--- Apache Error Log ---"
+          sudo tail -3 /var/log/apache2/blog_error.log 2>/dev/null || echo "No Apache errors"
+          echo "--- Setup Log ---"
+          tail -5 /var/log/userdata-setup.log 2>/dev/null || echo "No setup log"
         EOF
 
     # Step 12: Clean up sensitive files
@@ -271,9 +420,13 @@ jobs:
     - name: 📋 Deployment Summary
       run: |
         echo "🎉 Deployment completed successfully!"
+        echo "=========================="
         echo "🌐 Blog URL: http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog"
+        echo "🏠 Server Status: http://${{ steps.terraform-outputs.outputs.instance_ip }}"
         echo "🖥️ SSH Access: ssh -i your-key.pem ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}"
         echo "📊 Instance ID: ${{ steps.terraform-outputs.outputs.instance_id }}"
+        echo "🌍 Region: ${{ env.AWS_REGION }}"
+        echo "=========================="
 
   # Job 3: Run Security and Quality Checks
   security-scan:
@@ -297,18 +450,30 @@ jobs:
     - name: 🐘 PHP Code Quality Check
       run: |
         # Basic PHP syntax check
+        echo "Checking PHP syntax..."
         for file in src/*.php; do
           if [ -f "$file" ]; then
+            echo "Checking $file..."
             php -l "$file"
           fi
         done
+        echo "✅ PHP syntax check completed"
 
     # Step 4: Check for secrets in code
     - name: 🔍 Secret Scan
       run: |
+        echo "Scanning for potential secrets..."
         # Basic check for common secret patterns
-        if grep -r "password\|secret\|key" src/ --exclude-dir=.git || true; then
-          echo "⚠️ Found potential secrets in code. Please review."
-        else
-          echo "✅ No obvious secrets found in source code."
+        if grep -r -i "password.*=" src/ --exclude-dir=.git | grep -v "\$password" | grep -v "password.*input" || true; then
+          echo "⚠️ Found potential hardcoded passwords in code. Please review."
         fi
+        
+        if grep -r -i "secret.*=" src/ --exclude-dir=.git | grep -v "\$secret" || true; then
+          echo "⚠️ Found potential secrets in code. Please review."
+        fi
+        
+        if grep -r -i "key.*=" src/ --exclude-dir=.git | grep -v "\$key" | grep -v "array_key" || true; then
+          echo "⚠️ Found potential API keys in code. Please review."
+        fi
+        
+        echo "✅ Secret scan completed"
