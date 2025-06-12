@@ -1,4 +1,4 @@
-# terraform/main.tf - Updated to handle existing resources
+# terraform/main.tf - Fresh deployment configuration
 
 terraform {
   required_version = ">= 1.0"
@@ -32,44 +32,14 @@ provider "aws" {
       Environment = var.environment
       Project     = var.project_name
       ManagedBy   = "Terraform"
+      DeploymentType = "Fresh"
+      CreatedAt   = timestamp()
     }
   }
 }
 
-# Data sources to check for existing resources
-data "aws_s3_bucket" "existing_state_bucket" {
-  bucket = var.terraform_state_bucket
-  count  = var.use_existing_resources ? 1 : 0
-}
-
-data "aws_vpc" "existing_vpc" {
-  count = var.use_existing_resources && var.existing_vpc_id != "" ? 1 : 0
-  id    = var.existing_vpc_id
-}
-
-data "aws_subnet" "existing_subnet" {
-  count = var.use_existing_resources && var.existing_subnet_id != "" ? 1 : 0
-  id    = var.existing_subnet_id
-}
-
-data "aws_security_group" "existing_sg" {
-  count = var.use_existing_resources && var.existing_security_group_id != "" ? 1 : 0
-  id    = var.existing_security_group_id
-}
-
-data "aws_key_pair" "existing_keypair" {
-  count    = var.use_existing_resources && var.existing_key_pair_name != "" ? 1 : 0
-  key_name = var.existing_key_pair_name
-}
-
-data "aws_instance" "existing_instance" {
-  count = var.use_existing_resources && var.existing_instance_id != "" ? 1 : 0
-  instance_id = var.existing_instance_id
-}
-
-# Create S3 bucket only if it doesn't exist
+# Create S3 bucket for Terraform state storage (if it doesn't exist)
 resource "aws_s3_bucket" "terraform_state" {
-  count  = var.use_existing_resources ? 0 : 1
   bucket = var.terraform_state_bucket
 
   lifecycle {
@@ -83,20 +53,18 @@ resource "aws_s3_bucket" "terraform_state" {
   }
 }
 
-# S3 bucket versioning (conditional)
+# Enable versioning on the state bucket
 resource "aws_s3_bucket_versioning" "terraform_state_versioning" {
-  count  = var.use_existing_resources ? 0 : 1
-  bucket = aws_s3_bucket.terraform_state[0].id
+  bucket = aws_s3_bucket.terraform_state.id
 
   versioning_configuration {
     status = "Enabled"
   }
 }
 
-# S3 bucket encryption (conditional)
+# Enable encryption for the state bucket
 resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_encryption" {
-  count  = var.use_existing_resources ? 0 : 1
-  bucket = aws_s3_bucket.terraform_state[0].id
+  bucket = aws_s3_bucket.terraform_state.id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -106,45 +74,237 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_e
   }
 }
 
-# S3 bucket public access block (conditional)
+# Block public access to the state bucket
 resource "aws_s3_bucket_public_access_block" "terraform_state_pab" {
-  count  = var.use_existing_resources ? 0 : 1
-  bucket = aws_s3_bucket.terraform_state[0].id
+  bucket = aws_s3_bucket.terraform_state.id
 
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
-#hii
-# Local values for resource selection
-locals {
-  # Use existing resources if specified, otherwise create new ones
-  vpc_id = var.use_existing_resources && var.existing_vpc_id != "" ? data.aws_vpc.existing_vpc[0].id : aws_vpc.blog_vpc[0].id
-  
-  subnet_id = var.use_existing_resources && var.existing_subnet_id != "" ? data.aws_subnet.existing_subnet[0].id : aws_subnet.blog_public_subnet[0].id
-  
-  security_group_id = var.use_existing_resources && var.existing_security_group_id != "" ? data.aws_security_group.existing_sg[0].id : aws_security_group.blog_web_sg[0].id
-  
-  key_pair_name = var.use_existing_resources && var.existing_key_pair_name != "" ? data.aws_key_pair.existing_keypair[0].key_name : aws_key_pair.blog_keypair[0].key_name
-  
-  # Check if we should create a new instance or use existing
-  create_new_instance = var.use_existing_resources && var.existing_instance_id != "" ? false : true
-  
-  instance_id = var.use_existing_resources && var.existing_instance_id != "" ? data.aws_instance.existing_instance[0].id : (local.create_new_instance ? aws_instance.blog_server[0].id : "")
-  
-  instance_ip = var.use_existing_resources && var.existing_instance_id != "" ? data.aws_instance.existing_instance[0].public_ip : (local.create_new_instance ? aws_eip.blog_eip[0].public_ip : "")
+
+# Create VPC for fresh deployment
+resource "aws_vpc" "blog_vpc" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name        = "${var.project_name}-vpc-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
 }
 
-# EC2 Instance (conditional creation)
+# Create Internet Gateway
+resource "aws_internet_gateway" "blog_igw" {
+  vpc_id = aws_vpc.blog_vpc.id
+
+  tags = {
+    Name        = "${var.project_name}-igw-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# Create Public Subnet
+resource "aws_subnet" "blog_public_subnet" {
+  vpc_id                  = aws_vpc.blog_vpc.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = var.availability_zone
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name        = "${var.project_name}-public-subnet-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+    Type        = "Public"
+  }
+}
+
+# Create Route Table for Public Subnet
+resource "aws_route_table" "blog_public_rt" {
+  vpc_id = aws_vpc.blog_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.blog_igw.id
+  }
+
+  tags = {
+    Name        = "${var.project_name}-public-rt-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# Associate Route Table with Public Subnet
+resource "aws_route_table_association" "blog_public_rt_association" {
+  subnet_id      = aws_subnet.blog_public_subnet.id
+  route_table_id = aws_route_table.blog_public_rt.id
+}
+
+# Generate fresh SSH key pair
+resource "tls_private_key" "blog_private_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create fresh AWS key pair
+resource "aws_key_pair" "blog_keypair" {
+  key_name   = "${var.project_name}-keypair-${random_id.key_suffix.hex}"
+  public_key = tls_private_key.blog_private_key.public_key_openssh
+
+  tags = {
+    Name        = "${var.project_name}-keypair-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# Random suffix for unique resource names
+resource "random_id" "key_suffix" {
+  byte_length = 4
+}
+
+# Save private key to local file
+resource "local_file" "private_key" {
+  content         = tls_private_key.blog_private_key.private_key_pem
+  filename        = "${aws_key_pair.blog_keypair.key_name}.pem"
+  file_permission = "0600"
+}
+
+# Create fresh Security Group
+resource "aws_security_group" "blog_web_sg" {
+  name_prefix = "${var.project_name}-web-sg-fresh-"
+  description = "Fresh security group for blog web server"
+  vpc_id      = aws_vpc.blog_vpc.id
+
+  # HTTP access
+  ingress {
+    description = "HTTP access for web application"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_http_cidrs
+  }
+
+  # HTTPS access
+  ingress {
+    description = "HTTPS access for secure web application"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_http_cidrs
+  }
+
+  # SSH access
+  ingress {
+    description = "SSH access for server administration"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_ssh_cidrs
+  }
+
+  # All outbound traffic
+  egress {
+    description = "All outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.project_name}-web-sg-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# IAM role for EC2 instance
+resource "aws_iam_role" "blog_ec2_role" {
+  name = "${var.project_name}-ec2-role-${random_id.key_suffix.hex}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "${var.project_name}-ec2-role-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# Create instance profile for the IAM role
+resource "aws_iam_instance_profile" "blog_ec2_profile" {
+  name = "${var.project_name}-ec2-profile-${random_id.key_suffix.hex}"
+  role = aws_iam_role.blog_ec2_role.name
+
+  tags = {
+    Name        = "${var.project_name}-ec2-profile-fresh"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# IAM policy for EC2 instance
+resource "aws_iam_role_policy" "blog_ec2_policy" {
+  name = "${var.project_name}-ec2-policy-${random_id.key_suffix.hex}"
+  role = aws_iam_role.blog_ec2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      }
+    ]
+  })
+}
+
+# Data source for Ubuntu AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# Create fresh EC2 instance
 resource "aws_instance" "blog_server" {
-  count = local.create_new_instance ? 1 : 0
-  
-  ami                         = var.ami_id
+  ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
-  key_name                    = local.key_pair_name
-  subnet_id                   = local.subnet_id
-  vpc_security_group_ids      = [local.security_group_id]
+  key_name                    = aws_key_pair.blog_keypair.key_name
+  subnet_id                   = aws_subnet.blog_public_subnet.id
+  vpc_security_group_ids      = [aws_security_group.blog_web_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.blog_ec2_profile.name
   associate_public_ip_address = true
 
@@ -155,10 +315,11 @@ resource "aws_instance" "blog_server" {
     encrypted             = true
 
     tags = {
-      Name = "${var.instance_name}-root-volume"
+      Name = "${var.instance_name}-fresh-root-volume"
     }
   }
 
+  # Fresh userdata script for complete setup
   user_data = base64encode(templatefile("${path.module}/userdata.sh", {
     mysql_root_password = var.mysql_root_password
     mysql_blog_password = var.mysql_blog_password
@@ -168,45 +329,34 @@ resource "aws_instance" "blog_server" {
   }))
 
   tags = {
-    Name        = var.instance_name
+    Name        = "${var.instance_name}-fresh"
     Environment = var.environment
     Project     = var.project_name
     Role        = "WebServer"
     OS          = "Ubuntu"
+    Deployment  = "Fresh"
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  # Ensure proper resource ordering
+  depends_on = [
+    aws_vpc.blog_vpc,
+    aws_subnet.blog_public_subnet,
+    aws_security_group.blog_web_sg,
+    aws_internet_gateway.blog_igw,
+    aws_route_table_association.blog_public_rt_association
+  ]
 }
 
-# Elastic IP (conditional creation)
+# Create Elastic IP for fresh instance
 resource "aws_eip" "blog_eip" {
-  count    = local.create_new_instance ? 1 : 0
-  instance = aws_instance.blog_server[0].id
+  instance = aws_instance.blog_server.id
   domain   = "vpc"
 
-  depends_on = [aws_instance.blog_server]
+  depends_on = [aws_instance.blog_server, aws_internet_gateway.blog_igw]
 
   tags = {
-    Name        = "${var.project_name}-eip"
+    Name        = "${var.project_name}-eip-fresh"
     Environment = var.environment
     Project     = var.project_name
-  }
-}
-
-# Data source for Ubuntu AMI
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"]
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
   }
 }

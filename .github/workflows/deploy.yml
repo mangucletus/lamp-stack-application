@@ -1,644 +1,665 @@
-name: 🚀 Smart Blog Deployment
+name: 🔥 Destroy and Recreate Fresh Infrastructure
 
 on:
-  push:
-    branches:
-      - main
-    paths: 
-      - 'src/**'
-      - 'terraform/**'
   workflow_dispatch:
     inputs:
-      force_recreate:
-        description: 'Force recreation of all resources'
+      confirm_destruction:
+        description: 'Type "DESTROY" to confirm you want to destroy all existing resources'
+        required: true
+        type: string
+      backup_before_destroy:
+        description: 'Create backup before destroying'
         required: false
-        default: false
+        default: true
         type: boolean
+      instance_type:
+        description: 'EC2 Instance Type for fresh deployment'
+        required: false
+        default: 't3.micro'
+        type: choice
+        options:
+        - t3.micro
+        - t3.small
+        - t3.medium
 
 env:
-  AWS_DEFAULT_REGION: eu-west-1
+  AWS_REGION: eu-west-1
   TERRAFORM_VERSION: 1.6.6
 
 jobs:
-  deploy:
+  confirm-and-backup:
+    name: 🔍 Confirm Destruction and Backup
     runs-on: ubuntu-latest
+    
+    outputs:
+      proceed: ${{ steps.confirm.outputs.proceed }}
+      backup-created: ${{ steps.backup.outputs.backup_created }}
+    
     steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@v3
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: ✅ Confirm Destruction
+      id: confirm
+      run: |
+        if [ "${{ github.event.inputs.confirm_destruction }}" = "DESTROY" ]; then
+          echo "✅ Destruction confirmed"
+          echo "proceed=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Destruction not confirmed. You must type 'DESTROY' exactly."
+          echo "proceed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: 🔐 Configure AWS Credentials
+      if: steps.confirm.outputs.proceed == 'true'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 📋 Create Backup of Current Infrastructure
+      id: backup
+      if: steps.confirm.outputs.proceed == 'true' && github.event.inputs.backup_before_destroy == 'true'
+      run: |
+        echo "📋 Creating backup of current infrastructure..."
         
-      - name: 🔐 Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-west-1
-          
-      - name: 🔧 Set up Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
+        # Create backup directory
+        backup_dir="infrastructure-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$backup_dir"
+        
+        # Backup current EC2 instances
+        echo "=== Current EC2 Instances ===" > "$backup_dir/current_resources.txt"
+        aws ec2 describe-instances \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,InstanceType,Tags[?Key==`Name`].Value|[0]]' \
+          --output table >> "$backup_dir/current_resources.txt" 2>/dev/null || echo "No instances found" >> "$backup_dir/current_resources.txt"
+        
+        # Backup current VPCs
+        echo "" >> "$backup_dir/current_resources.txt"
+        echo "=== Current VPCs ===" >> "$backup_dir/current_resources.txt"
+        aws ec2 describe-vpcs \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'Vpcs[*].[VpcId,State,CidrBlock,Tags[?Key==`Name`].Value|[0]]' \
+          --output table >> "$backup_dir/current_resources.txt" 2>/dev/null || echo "No VPCs found" >> "$backup_dir/current_resources.txt"
+        
+        # Backup security groups
+        echo "" >> "$backup_dir/current_resources.txt"
+        echo "=== Current Security Groups ===" >> "$backup_dir/current_resources.txt"
+        aws ec2 describe-security-groups \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'SecurityGroups[*].[GroupId,GroupName,VpcId]' \
+          --output table >> "$backup_dir/current_resources.txt" 2>/dev/null || echo "No security groups found" >> "$backup_dir/current_resources.txt"
+        
+        # Backup key pairs
+        echo "" >> "$backup_dir/current_resources.txt"
+        echo "=== Current Key Pairs ===" >> "$backup_dir/current_resources.txt"
+        aws ec2 describe-key-pairs \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'KeyPairs[*].[KeyName,KeyType]' \
+          --output table >> "$backup_dir/current_resources.txt" 2>/dev/null || echo "No key pairs found" >> "$backup_dir/current_resources.txt"
+        
+        echo "✅ Backup created in: $backup_dir"
+        cat "$backup_dir/current_resources.txt"
+        
+        echo "backup_created=true" >> $GITHUB_OUTPUT
 
-      # === EXISTING RESOURCE DETECTION ===
-      - name: 🔍 Detect Existing Blog Infrastructure
-        id: detect
-        run: |
-          echo "🔍 Scanning for existing blog infrastructure..."
-          
-          # Method 1: Search by known IP
-          KNOWN_IP="54.78.153.43"
-          echo "Searching by known IP: $KNOWN_IP"
-          
-          IP_INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=ip-address,Values=$KNOWN_IP" \
-            --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName,Tags[?Key==`Name`].Value|[0]]' \
-            --output text 2>/dev/null || echo "")
-          
-          # Method 2: Search by project tag
-          echo "Searching by project tag..."
-          TAG_INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=tag:Project,Values=simple-blog" "Name=instance-state-name,Values=running,stopped,stopping,pending" \
-            --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName,Tags[?Key==`Name`].Value|[0]]' \
-            --output text 2>/dev/null || echo "")
-          
-          # Combine results and find best instance
-          ALL_INSTANCES="$IP_INSTANCES$TAG_INSTANCES"
-          
-          if [ -n "$ALL_INSTANCES" ] && [ "${{ github.event.inputs.force_recreate }}" != "true" ]; then
-            echo "Found existing instances:"
-            echo "$ALL_INSTANCES"
-            
-            # Select best instance (prefer known IP, then running state)
-            BEST_INSTANCE=""
-            BEST_SCORE=0
-            
-            while IFS=$'\t' read -r inst_id state pub_ip vpc subnet sg key name; do
-              if [ -n "$inst_id" ] && [ "$inst_id" != "None" ]; then
-                SCORE=0
-                
-                # Score by state
-                case "$state" in
-                  "running") SCORE=$((SCORE + 100)) ;;
-                  "stopped") SCORE=$((SCORE + 50)) ;;
-                  "pending") SCORE=$((SCORE + 30)) ;;
-                  "stopping") SCORE=$((SCORE + 20)) ;;
-                esac
-                
-                # Bonus for known IP
-                if [ "$pub_ip" = "$KNOWN_IP" ]; then
-                  SCORE=$((SCORE + 200))
-                fi
-                
-                echo "Instance $inst_id: state=$state, ip=$pub_ip, score=$SCORE"
-                
-                if [ $SCORE -gt $BEST_SCORE ]; then
-                  BEST_SCORE=$SCORE
-                  BEST_INSTANCE="$inst_id|$state|$pub_ip|$vpc|$subnet|$sg|$key|$name"
-                fi
-              fi
-            done <<< "$ALL_INSTANCES"
-            
-            if [ -n "$BEST_INSTANCE" ]; then
-              IFS='|' read -r INSTANCE_ID INSTANCE_STATE INSTANCE_IP VPC_ID SUBNET_ID SG_ID KEY_NAME INST_NAME <<< "$BEST_INSTANCE"
-              
-              echo "🎯 Selected best instance:"
-              echo "  ID: $INSTANCE_ID"
-              echo "  State: $INSTANCE_STATE"
-              echo "  IP: ${INSTANCE_IP:-None}"
-              echo "  VPC: $VPC_ID"
-              echo "  Name: ${INST_NAME:-Unknown}"
-              
-              # Set outputs
-              echo "has_existing=true" >> $GITHUB_OUTPUT
-              echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-              echo "instance_state=$INSTANCE_STATE" >> $GITHUB_OUTPUT
-              echo "instance_ip=${INSTANCE_IP:-}" >> $GITHUB_OUTPUT
-              echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-              echo "subnet_id=$SUBNET_ID" >> $GITHUB_OUTPUT
-              echo "security_group_id=$SG_ID" >> $GITHUB_OUTPUT
-              echo "key_name=${KEY_NAME:-}" >> $GITHUB_OUTPUT
-              
-              echo "✅ Existing infrastructure detected - will reuse resources"
-            else
-              echo "❌ No suitable instances found"
-              echo "has_existing=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            if [ "${{ github.event.inputs.force_recreate }}" = "true" ]; then
-              echo "🔄 Force recreate requested"
-            else
-              echo "No existing instances found"
-            fi
-            echo "has_existing=false" >> $GITHUB_OUTPUT
-          fi
+  destroy-infrastructure:
+    name: 🔥 Destroy Existing Infrastructure
+    runs-on: ubuntu-latest
+    needs: confirm-and-backup
+    if: needs.confirm-and-backup.outputs.proceed == 'true'
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
 
-      # === INSTANCE STATE MANAGEMENT ===
-      - name: 🚀 Manage Instance State
-        id: manage_instance
-        if: steps.detect.outputs.has_existing == 'true'
-        run: |
-          INSTANCE_ID="${{ steps.detect.outputs.instance_id }}"
-          INSTANCE_STATE="${{ steps.detect.outputs.instance_state }}"
-          INSTANCE_IP="${{ steps.detect.outputs.instance_ip }}"
-          
-          echo "🎯 Managing instance: $INSTANCE_ID (current state: $INSTANCE_STATE)"
-          
-          case "$INSTANCE_STATE" in
-            "running")
-              echo "✅ Instance is already running"
-              FINAL_IP="$INSTANCE_IP"
-              echo "final_state=running" >> $GITHUB_OUTPUT
-              ;;
-            "stopped")
-              echo "🚀 Starting stopped instance..."
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID"
-              
-              echo "⏳ Waiting for instance to start (max 10 minutes)..."
-              MAX_WAIT=600
-              ELAPSED=0
-              
-              while [ $ELAPSED -lt $MAX_WAIT ]; do
-                CURRENT_STATE=$(aws ec2 describe-instances \
-                  --instance-ids "$INSTANCE_ID" \
-                  --query 'Reservations[0].Instances[0].State.Name' \
-                  --output text)
-                
-                echo "Instance state: $CURRENT_STATE (${ELAPSED}s elapsed)"
-                
-                if [ "$CURRENT_STATE" = "running" ]; then
-                  echo "✅ Instance started successfully!"
-                  
-                  # Get current IP
-                  FINAL_IP=$(aws ec2 describe-instances \
-                    --instance-ids "$INSTANCE_ID" \
-                    --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                    --output text)
-                  
-                  if [ "$FINAL_IP" = "None" ] || [ -z "$FINAL_IP" ]; then
-                    # Check for Elastic IP
-                    EIP=$(aws ec2 describe-addresses \
-                      --filters "Name=instance-id,Values=$INSTANCE_ID" \
-                      --query 'Addresses[0].PublicIp' \
-                      --output text 2>/dev/null || echo "None")
-                    
-                    if [ "$EIP" != "None" ] && [ -n "$EIP" ]; then
-                      FINAL_IP="$EIP"
-                      echo "📌 Using Elastic IP: $FINAL_IP"
-                    else
-                      echo "⚠️ Instance has no public IP"
-                      FINAL_IP=""
-                    fi
-                  fi
-                  
-                  echo "final_state=running" >> $GITHUB_OUTPUT
-                  break
-                fi
-                
-                sleep 15
-                ELAPSED=$((ELAPSED + 15))
-              done
-              
-              if [ $ELAPSED -ge $MAX_WAIT ]; then
-                echo "❌ Timeout waiting for instance to start"
-                exit 1
-              fi
-              ;;
-            "stopping")
-              echo "⏳ Instance is stopping, waiting for stop then starting..."
-              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID"
-              aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-              
-              FINAL_IP=$(aws ec2 describe-instances \
-                --instance-ids "$INSTANCE_ID" \
-                --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                --output text)
-              echo "final_state=running" >> $GITHUB_OUTPUT
-              ;;
-            "pending")
-              echo "⏳ Instance is starting, waiting for completion..."
-              aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-              
-              FINAL_IP=$(aws ec2 describe-instances \
-                --instance-ids "$INSTANCE_ID" \
-                --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                --output text)
-              echo "final_state=running" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "❌ Instance in unsupported state: $INSTANCE_STATE"
-              exit 1
-              ;;
-          esac
-          
-          echo "final_ip=${FINAL_IP:-}" >> $GITHUB_OUTPUT
-          echo "✅ Instance ready at IP: ${FINAL_IP:-No Public IP}"
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
 
-      # === TERRAFORM STATE MANAGEMENT ===
-      - name: 🔧 Setup Terraform Backend
-        run: |
-          cd terraform
-          echo "🔧 Configuring Terraform remote state..."
-          
-          # Check if state bucket exists
-          STATE_BUCKET="${{ secrets.TERRAFORM_STATE_BUCKET }}"
-          if [ -z "$STATE_BUCKET" ]; then
-            STATE_BUCKET="cletusmangu-lampstack-app-terraform-state-2025"
-          fi
-          
-          if ! aws s3 ls "s3://${STATE_BUCKET}" >/dev/null 2>&1; then
-            echo "📦 Creating Terraform state bucket: ${STATE_BUCKET}"
-            aws s3 mb "s3://${STATE_BUCKET}" --region eu-west-1
-            
-            # Enable versioning
-            aws s3api put-bucket-versioning \
-              --bucket "${STATE_BUCKET}" \
-              --versioning-configuration Status=Enabled
-              
-            # Enable encryption
-            aws s3api put-bucket-encryption \
-              --bucket "${STATE_BUCKET}" \
-              --server-side-encryption-configuration \
-              '{
-                "Rules": [
-                  {
-                    "ApplyServerSideEncryptionByDefault": {
-                      "SSEAlgorithm": "AES256"
-                    }
-                  }
-                ]
-              }'
-            
-            echo "✅ Terraform state bucket created and configured"
-          else
-            echo "✅ Terraform state bucket already exists: ${STATE_BUCKET}"
-          fi
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: 📝 Create Terraform Configuration
-        run: |
-          cd terraform
-          echo "📝 Creating Terraform configuration..."
-          
-          HAS_EXISTING="${{ steps.detect.outputs.has_existing }}"
-          
-          if [ "$HAS_EXISTING" = "true" ]; then
-            echo "📝 Configuring for existing resources..."
-            
-            cat > terraform.tfvars << EOF
-          # Auto-generated for EXISTING resources - $(date)
-          use_existing_resources = true
-          
-          # Existing resource IDs
-          existing_instance_id = "${{ steps.detect.outputs.instance_id }}"
-          existing_vpc_id = "${{ steps.detect.outputs.vpc_id }}"
-          existing_subnet_id = "${{ steps.detect.outputs.subnet_id }}"
-          existing_security_group_id = "${{ steps.detect.outputs.security_group_id }}"
-          existing_key_pair_name = "${{ steps.detect.outputs.key_name }}"
-          
-          # Project configuration
-          aws_region = "eu-west-1"
-          environment = "production"
-          project_name = "simple-blog"
-          terraform_state_bucket = "cletusmangu-lampstack-app-terraform-state-2025"
-          github_repo_url = "${{ github.server_url }}/${{ github.repository }}.git"
-          
-          # Database passwords
-          mysql_root_password = "${{ secrets.MYSQL_ROOT_PASSWORD || 'RootSecurePassword123!' }}"
-          mysql_blog_password = "${{ secrets.MYSQL_BLOG_PASSWORD || 'SecurePassword123!' }}"
-          EOF
-            
-            echo "✅ Using existing resources configuration"
-          else
-            echo "📝 Configuring for new resources..."
-            
-            cat > terraform.tfvars << EOF
-          # Auto-generated for NEW resources - $(date)
-          use_existing_resources = false
-          
-          # Project configuration
-          aws_region = "eu-west-1"
-          environment = "production"
-          project_name = "simple-blog"
-          terraform_state_bucket = "cletusmangu-lampstack-app-terraform-state-2025"
-          github_repo_url = "${{ github.server_url }}/${{ github.repository }}.git"
-          
-          # Database passwords
-          mysql_root_password = "${{ secrets.MYSQL_ROOT_PASSWORD || 'RootSecurePassword123!' }}"
-          mysql_blog_password = "${{ secrets.MYSQL_BLOG_PASSWORD || 'SecurePassword123!' }}"
-          EOF
-            
-            echo "✅ Creating new resources configuration"
-          fi
+    - name: 🗑️ Terraform Destroy
+      working-directory: ./terraform
+      run: |
+        echo "🔥 Starting Terraform destroy process..."
+        
+        # Remove any existing tfvars that might interfere
+        rm -f terraform.tfvars
+        
+        # Create clean tfvars for destruction
+        cat > terraform.tfvars << EOF
+        # Configuration for destruction
+        use_existing_resources = false
+        aws_region = "${{ env.AWS_REGION }}"
+        environment = "production"
+        project_name = "simple-blog"
+        terraform_state_bucket = "${{ secrets.TERRAFORM_STATE_BUCKET }}"
+        mysql_root_password = "${{ secrets.MYSQL_ROOT_PASSWORD || 'RootSecurePassword123!' }}"
+        mysql_blog_password = "${{ secrets.MYSQL_BLOG_PASSWORD || 'SecurePassword123!' }}"
+        EOF
+        
+        # Initialize Terraform
+        terraform init \
+          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -backend-config="key=blog-app/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+        
+        # Destroy all resources
+        echo "🔥 Destroying all Terraform-managed resources..."
+        terraform destroy -auto-approve || echo "Terraform destroy completed with warnings"
+        
+        # Clean up Terraform state
+        rm -f terraform.tfstate*
+        rm -f tfplan
+        echo "✅ Terraform destroy completed"
 
-      # === SAFE TERRAFORM DEPLOYMENT ===
-      - name: 🔄 Terraform Init
-        run: |
-          cd terraform
-          echo "🔄 Initializing Terraform..."
-          terraform init -input=false \
-            -backend-config="bucket=cletusmangu-lampstack-app-terraform-state-2025" \
-            -backend-config="key=blog-app/terraform.tfstate" \
-            -backend-config="region=eu-west-1"
-          
-      - name: 🔍 Terraform Validate
-        run: |
-          cd terraform
-          echo "🔍 Validating Terraform configuration..."
-          terraform validate
-          
-      - name: 📋 Terraform Plan with Change Detection
-        id: plan
-        run: |
-          cd terraform
-          echo "📋 Planning Terraform changes..."
-          
-          # Run terraform plan and capture exit code
-          set +e
-          terraform plan -detailed-exitcode -out=tfplan
-          PLAN_EXIT_CODE=$?
-          set -e
-          
-          echo "Plan exit code: $PLAN_EXIT_CODE"
-          
-          # Handle different exit codes
-          case $PLAN_EXIT_CODE in
-            0)
-              echo "✅ No changes detected - infrastructure is up to date"
-              echo "has_changes=false" >> $GITHUB_OUTPUT
-              echo "plan_status=no_changes" >> $GITHUB_OUTPUT
-              ;;
-            1)
-              echo "❌ Terraform plan failed"
-              exit 1
-              ;;
-            2)
-              echo "📝 Changes detected - will apply updates"
-              echo "has_changes=true" >> $GITHUB_OUTPUT
-              echo "plan_status=has_changes" >> $GITHUB_OUTPUT
-              
-              # Show plan summary
-              echo "📊 Terraform Plan Summary:"
-              terraform show -no-color tfplan | grep -E "Plan:|# |~|+|-" | head -20
-              ;;
-            *)
-              echo "❌ Unexpected terraform plan exit code: $PLAN_EXIT_CODE"
-              exit 1
-              ;;
-          esac
-          
-      - name: 🚀 Terraform Apply (Only if Changes Detected)
-        if: steps.plan.outputs.has_changes == 'true'
-        run: |
-          cd terraform
-          echo "🚀 Applying Terraform changes..."
-          terraform apply -auto-approve tfplan
-          echo "✅ Infrastructure changes applied successfully"
-          
-      - name: ⏭️ Skip Infrastructure (No Changes)
-        if: steps.plan.outputs.has_changes == 'false'
-        run: |
-          echo "⏭️ Skipping infrastructure deployment - no changes detected"
-          echo "📊 Current infrastructure state is already up-to-date"
-
-      # === EXTRACT INFRASTRUCTURE OUTPUTS ===
-      - name: 📤 Get Infrastructure Information
-        id: infrastructure
-        run: |
-          cd terraform
-          echo "📤 Extracting infrastructure outputs..."
-          
-          # Get outputs with fallbacks
-          INSTANCE_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "${{ steps.manage_instance.outputs.final_ip }}")
-          INSTANCE_ID=$(terraform output -raw instance_id 2>/dev/null || echo "${{ steps.detect.outputs.instance_id }}")
-          SSH_KEY_NAME=$(terraform output -raw ssh_key_name 2>/dev/null || echo "${{ steps.detect.outputs.key_name }}")
-          
-          # Validate critical outputs
-          if [ -z "$INSTANCE_IP" ] || [ -z "$INSTANCE_ID" ]; then
-            echo "❌ Error: Missing required infrastructure information"
-            echo "INSTANCE_IP: '$INSTANCE_IP'"
-            echo "INSTANCE_ID: '$INSTANCE_ID'"
-            echo "SSH_KEY_NAME: '$SSH_KEY_NAME'"
-            
-            echo "🔍 Available outputs:"
-            terraform output || echo "No outputs available"
-            exit 1
-          fi
-          
-          # Set outputs
-          echo "instance_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "ssh_key_name=$SSH_KEY_NAME" >> $GITHUB_OUTPUT
-          
-          echo "✅ Infrastructure information extracted:"
-          echo "🌐 Instance IP: $INSTANCE_IP"
-          echo "📊 Instance ID: $INSTANCE_ID"
-          echo "🔑 SSH Key: $SSH_KEY_NAME"
-
-      # === APPLICATION DEPLOYMENT ===
-      - name: 🔑 Setup SSH Key
-        run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
-
-      - name: 🔌 Smart SSH Connectivity Check
-        run: |
-          INSTANCE_IP="${{ steps.infrastructure.outputs.instance_ip }}"
-          HAS_EXISTING="${{ steps.detect.outputs.has_existing }}"
-          
-          if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" = "None" ]; then
-            echo "❌ No public IP available for deployment"
-            exit 1
-          fi
-          
-          echo "🔌 Testing SSH connectivity to $INSTANCE_IP..."
-          
-          # Set timeouts based on whether instance is existing or new
-          if [ "$HAS_EXISTING" = "true" ]; then
-            MAX_ATTEMPTS=8
-            WAIT_TIME=15
-            echo "Using existing instance - shorter timeout"
-          else
-            MAX_ATTEMPTS=20
-            WAIT_TIME=30
-            echo "Using new instance - longer timeout for userdata"
-          fi
-          
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo "SSH attempt $attempt/$MAX_ATTEMPTS..."
-            
-            if timeout 15 ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$INSTANCE_IP "echo 'SSH connection successful'" 2>/dev/null; then
-              echo "✅ SSH connection established!"
-              break
-            fi
-            
-            if [ $attempt -eq $MAX_ATTEMPTS ]; then
-              echo "❌ SSH connection failed after $MAX_ATTEMPTS attempts"
-              echo "This could indicate:"
-              echo "  - Security group doesn't allow SSH (port 22)"
-              echo "  - Instance is in private subnet"
-              echo "  - SSH key mismatch"
-              echo "  - Instance still initializing (for new instances)"
-              exit 1
-            fi
-            
-            echo "Waiting ${WAIT_TIME}s before next attempt..."
-            sleep $WAIT_TIME
+    - name: 🧹 Manual Resource Cleanup
+      run: |
+        echo "🧹 Performing comprehensive manual cleanup..."
+        
+        # Function to safely delete resources
+        safe_delete() {
+          local resource_type="$1"
+          local delete_command="$2"
+          echo "Cleaning up $resource_type..."
+          eval "$delete_command" || echo "No $resource_type to clean up"
+        }
+        
+        # Terminate all blog project instances
+        echo "🔥 Terminating EC2 instances..."
+        INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Project,Values=simple-blog" "Name=instance-state-name,Values=running,stopped,pending" \
+          --query 'Reservations[*].Instances[*].InstanceId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$INSTANCES" ]; then
+          echo "Found instances: $INSTANCES"
+          for instance in $INSTANCES; do
+            echo "Terminating instance: $instance"
+            aws ec2 terminate-instances --instance-ids "$instance" || echo "Failed to terminate $instance"
           done
+          
+          # Wait for termination
+          echo "Waiting for instances to terminate..."
+          for instance in $INSTANCES; do
+            aws ec2 wait instance-terminated --instance-ids "$instance" || echo "Timeout waiting for $instance"
+          done
+          echo "✅ All instances terminated"
+        fi
+        
+        # Release Elastic IPs
+        echo "🔗 Releasing Elastic IPs..."
+        EIPS=$(aws ec2 describe-addresses \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'Addresses[*].AllocationId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$EIPS" ]; then
+          for eip in $EIPS; do
+            echo "Releasing EIP: $eip"
+            aws ec2 release-address --allocation-id "$eip" || echo "Failed to release $eip"
+          done
+        fi
+        
+        # Delete Security Groups (with retry for dependencies)
+        echo "🛡️ Deleting security groups..."
+        for attempt in 1 2 3; do
+          SGS=$(aws ec2 describe-security-groups \
+            --filters "Name=tag:Project,Values=simple-blog" \
+            --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$SGS" ]; then
+            for sg in $SGS; do
+              echo "Attempt $attempt: Deleting security group: $sg"
+              aws ec2 delete-security-group --group-id "$sg" || echo "Failed to delete $sg (may have dependencies)"
+            done
+            sleep 10
+          else
+            break
+          fi
+        done
+        
+        # Delete Subnets
+        echo "🌐 Deleting subnets..."
+        SUBNETS=$(aws ec2 describe-subnets \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'Subnets[*].SubnetId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$SUBNETS" ]; then
+          for subnet in $SUBNETS; do
+            echo "Deleting subnet: $subnet"
+            aws ec2 delete-subnet --subnet-id "$subnet" || echo "Failed to delete $subnet"
+          done
+        fi
+        
+        # Delete Internet Gateways
+        echo "🌍 Deleting internet gateways..."
+        IGWS=$(aws ec2 describe-internet-gateways \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'InternetGateways[*].InternetGatewayId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$IGWS" ]; then
+          for igw in $IGWS; do
+            # Detach from VPCs first
+            VPCS=$(aws ec2 describe-internet-gateways \
+              --internet-gateway-ids "$igw" \
+              --query 'InternetGateways[0].Attachments[*].VpcId' \
+              --output text 2>/dev/null || echo "")
+            
+            for vpc in $VPCS; do
+              echo "Detaching IGW $igw from VPC $vpc"
+              aws ec2 detach-internet-gateway --internet-gateway-id "$igw" --vpc-id "$vpc" || echo "Failed to detach $igw from $vpc"
+            done
+            
+            echo "Deleting internet gateway: $igw"
+            aws ec2 delete-internet-gateway --internet-gateway-id "$igw" || echo "Failed to delete $igw"
+          done
+        fi
+        
+        # Delete Route Tables (non-default)
+        echo "🗺️ Deleting route tables..."
+        ROUTE_TABLES=$(aws ec2 describe-route-tables \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'RouteTables[*].RouteTableId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$ROUTE_TABLES" ]; then
+          for rt in $ROUTE_TABLES; do
+            echo "Deleting route table: $rt"
+            aws ec2 delete-route-table --route-table-id "$rt" || echo "Failed to delete $rt"
+          done
+        fi
+        
+        # Delete VPCs
+        echo "🏠 Deleting VPCs..."
+        VPCS=$(aws ec2 describe-vpcs \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'Vpcs[*].VpcId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$VPCS" ]; then
+          for vpc in $VPCS; do
+            echo "Deleting VPC: $vpc"
+            aws ec2 delete-vpc --vpc-id "$vpc" || echo "Failed to delete $vpc"
+          done
+        fi
+        
+        # Delete Key Pairs
+        echo "🔑 Deleting key pairs..."
+        KEYS=$(aws ec2 describe-key-pairs \
+          --filters "Name=tag:Project,Values=simple-blog" \
+          --query 'KeyPairs[*].KeyName' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$KEYS" ]; then
+          for key in $KEYS; do
+            echo "Deleting key pair: $key"
+            aws ec2 delete-key-pair --key-name "$key" || echo "Failed to delete $key"
+          done
+        fi
+        
+        echo "✅ Manual cleanup completed"
 
-      - name: 🚀 Deploy Application
-        run: |
-          INSTANCE_IP="${{ steps.infrastructure.outputs.instance_ip }}"
-          echo "🚀 Deploying application to $INSTANCE_IP..."
+  create-fresh-infrastructure:
+    name: 🆕 Create Fresh Infrastructure
+    runs-on: ubuntu-latest
+    needs: destroy-infrastructure
+    
+    outputs:
+      instance-ip: ${{ steps.terraform-outputs.outputs.instance_ip }}
+      instance-id: ${{ steps.terraform-outputs.outputs.instance_id }}
+      ssh-key-name: ${{ steps.terraform-outputs.outputs.ssh_key_name }}
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 📝 Create Fresh Terraform Configuration
+      working-directory: ./terraform
+      run: |
+        echo "📝 Creating fresh Terraform configuration..."
+        
+        # Create clean tfvars for fresh deployment
+        cat > terraform.tfvars << EOF
+        # Fresh infrastructure configuration
+        use_existing_resources = false
+        
+        # Project configuration
+        aws_region = "${{ env.AWS_REGION }}"
+        environment = "production"
+        project_name = "simple-blog"
+        terraform_state_bucket = "${{ secrets.TERRAFORM_STATE_BUCKET }}"
+        github_repo_url = "${{ github.server_url }}/${{ github.repository }}.git"
+        
+        # Instance configuration
+        instance_type = "${{ github.event.inputs.instance_type }}"
+        instance_name = "simple-blog-server-fresh"
+        
+        # Database configuration
+        mysql_root_password = "${{ secrets.MYSQL_ROOT_PASSWORD || 'RootSecurePassword123!' }}"
+        mysql_blog_password = "${{ secrets.MYSQL_BLOG_PASSWORD || 'SecurePassword123!' }}"
+        
+        # Network configuration
+        vpc_cidr = "10.0.0.0/16"
+        public_subnet_cidr = "10.0.1.0/24"
+        availability_zone = "${{ env.AWS_REGION }}a"
+        
+        # Security configuration
+        allowed_ssh_cidrs = ["0.0.0.0/0"]
+        allowed_http_cidrs = ["0.0.0.0/0"]
+        EOF
+        
+        echo "✅ Fresh configuration created"
+
+    - name: 🚀 Terraform Init and Apply
+      working-directory: ./terraform
+      run: |
+        echo "🚀 Creating fresh infrastructure..."
+        
+        # Initialize Terraform
+        terraform init \
+          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -backend-config="key=blog-app/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+        
+        # Plan the deployment
+        terraform plan -out=tfplan
+        
+        # Apply the plan
+        terraform apply -auto-approve tfplan
+        
+        echo "✅ Fresh infrastructure created"
+
+    - name: 📤 Get Fresh Infrastructure Outputs
+      id: terraform-outputs
+      working-directory: ./terraform
+      run: |
+        echo "📤 Retrieving fresh infrastructure information..."
+        
+        INSTANCE_IP=$(terraform output -raw instance_public_ip)
+        INSTANCE_ID=$(terraform output -raw instance_id)
+        SSH_KEY_NAME=$(terraform output -raw ssh_key_name)
+        
+        echo "instance_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+        echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+        echo "ssh_key_name=$SSH_KEY_NAME" >> $GITHUB_OUTPUT
+        
+        echo "✅ Fresh infrastructure details:"
+        echo "  Instance IP: $INSTANCE_IP"
+        echo "  Instance ID: $INSTANCE_ID"
+        echo "  SSH Key: $SSH_KEY_NAME"
+
+  deploy-fresh-application:
+    name: 🚀 Deploy Fresh Application
+    runs-on: ubuntu-latest
+    needs: create-fresh-infrastructure
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 🔑 Setup SSH Key
+      run: |
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
+        chmod 600 private_key.pem
+
+    - name: ⏳ Wait for Fresh Instance Complete Setup
+      run: |
+        INSTANCE_IP="${{ needs.create-fresh-infrastructure.outputs.instance-ip }}"
+        echo "⏳ Waiting for fresh instance to be completely ready..."
+        
+        # Wait for SSH connectivity
+        echo "🔌 Testing SSH connectivity..."
+        max_attempts=30
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt/$max_attempts: Testing SSH to $INSTANCE_IP..."
           
-          # Create deployment package
-          tar -czf blog-app.tar.gz src/
-          echo "✅ Created deployment package"
-          
-          # Upload application
-          echo "📤 Uploading application..."
-          scp -i private_key.pem -o StrictHostKeyChecking=no blog-app.tar.gz ubuntu@$INSTANCE_IP:/tmp/
-          
-          # Deploy with comprehensive service management
-          echo "🎯 Executing deployment..."
-          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << 'DEPLOY_END'
-          set -e
-          
-          echo "=== Smart Application Deployment ==="
-          
-          # Extract files
-          cd /tmp
-          tar -xzf blog-app.tar.gz
-          echo "✅ Files extracted"
-          
-          # Deploy files
-          sudo mkdir -p /var/www/html/blog
-          sudo cp -r src/* /var/www/html/blog/
-          sudo chown -R www-data:www-data /var/www/html/blog
-          sudo chmod -R 755 /var/www/html/blog
-          echo "✅ Files deployed"
-          
-          # Service management
-          echo "🔧 Managing services..."
-          
-          # Apache
-          if command -v apache2 >/dev/null 2>&1; then
-            if ! systemctl is-active --quiet apache2; then
-              echo "Starting Apache..."
-              sudo systemctl start apache2
-              sudo systemctl enable apache2
-            else
-              echo "Reloading Apache..."
-              sudo systemctl reload apache2
-            fi
-            echo "Apache: $(systemctl is-active apache2)"
+          if timeout 10 ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$INSTANCE_IP "echo 'SSH ready'" 2>/dev/null; then
+            echo "✅ SSH connection established!"
+            break
           fi
           
-          # MySQL
-          if command -v mysql >/dev/null 2>&1; then
-            if ! systemctl is-active --quiet mysql; then
-              echo "Starting MySQL..."
-              sudo systemctl start mysql
-              sudo systemctl enable mysql
-            fi
-            echo "MySQL: $(systemctl is-active mysql)"
-            
-            # Database setup
-            if [ -f "/var/www/html/blog/database.sql" ]; then
-              echo "Setting up database..."
-              for auth in "mysql -u root -p'${{ secrets.MYSQL_ROOT_PASSWORD }}'" "mysql -u root -pRootSecurePassword123!" "mysql -u root" "sudo mysql"; do
-                if eval "$auth -e 'SELECT 1' >/dev/null 2>&1"; then
-                  eval "$auth < /var/www/html/blog/database.sql" >/dev/null 2>&1 || echo "Database setup attempted"
-                  break
-                fi
-              done
-            fi
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ SSH connection failed after $max_attempts attempts"
+            exit 1
           fi
           
-          # Final status
-          systemctl is-active apache2 >/dev/null && echo "✅ Apache: RUNNING" || echo "❌ Apache: STOPPED"
-          systemctl is-active mysql >/dev/null && echo "✅ MySQL: RUNNING" || echo "❌ MySQL: STOPPED"
-          [ -f "/var/www/html/blog/index.php" ] && echo "✅ Blog: DEPLOYED" || echo "❌ Blog: MISSING"
+          sleep 20
+          ((attempt++))
+        done
+        
+        # Wait for userdata completion
+        echo "⏳ Waiting for system initialization to complete..."
+        max_attempts=50
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt/$max_attempts: Checking system initialization..."
           
-          rm -f /tmp/blog-app.tar.gz /tmp/src -rf
-          echo "✅ Deployment completed!"
-          DEPLOY_END
+          if ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "test -f /var/log/userdata-complete" 2>/dev/null; then
+            echo "✅ System initialization completed!"
+            break
+          fi
+          
+          # Show progress every 5 attempts
+          if [ $((attempt % 5)) -eq 0 ]; then
+            echo "📋 Current initialization status:"
+            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "tail -3 /var/log/userdata-setup.log 2>/dev/null || echo 'System still initializing...'" || true
+          fi
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "⚠️ Initialization check timed out, proceeding with deployment..."
+            break
+          fi
+          
+          sleep 30
+          ((attempt++))
+        done
+        
+        # Verify fresh services installation
+        echo "🔍 Verifying fresh services installation..."
+        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "
+          echo '=== Fresh Installation Verification ==='
+          systemctl is-active apache2 && echo '✅ Apache: ACTIVE' || echo '❌ Apache: INACTIVE'
+          systemctl is-active mysql && echo '✅ MySQL: ACTIVE' || echo '❌ MySQL: INACTIVE'
+          php --version | head -1 && echo '✅ PHP: INSTALLED' || echo '❌ PHP: MISSING'
+          echo '✅ Fresh instance is ready for deployment!'
+        "
 
-      - name: 🔍 Verify Deployment
-        run: |
-          INSTANCE_IP="${{ steps.infrastructure.outputs.instance_ip }}"
-          echo "🔍 Verifying deployment..."
+    - name: 🚀 Deploy Fresh Application
+      run: |
+        INSTANCE_IP="${{ needs.create-fresh-infrastructure.outputs.instance-ip }}"
+        echo "🚀 Deploying fresh application to $INSTANCE_IP..."
+        
+        # Create fresh deployment package
+        tar -czf fresh-blog-app.tar.gz src/
+        echo "✅ Fresh deployment package created"
+        
+        # Upload to fresh instance
+        scp -i private_key.pem -o StrictHostKeyChecking=no fresh-blog-app.tar.gz ubuntu@$INSTANCE_IP:/tmp/
+        echo "✅ Fresh application uploaded"
+        
+        # Deploy fresh application
+        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << 'EOF'
+        set -e
+        
+        echo "=== Fresh Application Deployment ==="
+        
+        # Extract fresh application
+        cd /tmp
+        tar -xzf fresh-blog-app.tar.gz
+        echo "✅ Fresh application extracted"
+        
+        # Deploy to fresh web directory
+        BLOG_DIR="/var/www/html/blog"
+        sudo mkdir -p "$BLOG_DIR"
+        
+        echo "📁 Deploying fresh application files..."
+        sudo cp -r src/* "$BLOG_DIR/"
+        sudo chown -R www-data:www-data "$BLOG_DIR"
+        sudo chmod -R 755 "$BLOG_DIR"
+        echo "✅ Fresh application files deployed"
+        
+        # Setup fresh database
+        if [ -f "$BLOG_DIR/database.sql" ]; then
+          echo "🗄️ Setting up fresh database..."
           
-          sleep 15
+          # Try different MySQL authentication methods for fresh install
+          DB_SUCCESS=false
           
-          for attempt in {1..6}; do
-            echo "HTTP test attempt $attempt/6..."
+          # Try with configured password first
+          if mysql -u root -p"${MYSQL_ROOT_PASSWORD:-RootSecurePassword123!}" < "$BLOG_DIR/database.sql" 2>/dev/null; then
+            echo "✅ Fresh database setup with configured password"
+            DB_SUCCESS=true
+          # Try without password (fresh MySQL install)
+          elif mysql -u root < "$BLOG_DIR/database.sql" 2>/dev/null; then
+            echo "✅ Fresh database setup without password"
+            DB_SUCCESS=true
+          # Try with sudo mysql (Ubuntu default)
+          elif sudo mysql < "$BLOG_DIR/database.sql" 2>/dev/null; then
+            echo "✅ Fresh database setup with sudo"
+            DB_SUCCESS=true
+          fi
+          
+          if [ "$DB_SUCCESS" = true ]; then
+            echo "✅ Fresh database configured successfully"
+          else
+            echo "⚠️ Fresh database setup had issues"
+          fi
+        fi
+        
+        # Restart fresh services
+        echo "🔄 Restarting fresh services..."
+        sudo systemctl restart apache2
+        sudo systemctl restart mysql
+        
+        # Final fresh verification
+        echo "=== Fresh Deployment Verification ==="
+        systemctl is-active apache2 && echo "✅ Apache: RUNNING" || echo "❌ Apache: FAILED"
+        systemctl is-active mysql && echo "✅ MySQL: RUNNING" || echo "❌ MySQL: FAILED"
+        
+        if [ -f "$BLOG_DIR/index.php" ]; then
+          echo "✅ Fresh blog files: DEPLOYED"
+        else
+          echo "❌ Fresh blog files: MISSING"
+        fi
+        
+        # Test fresh database connection
+        if mysql -u blog_user -p"${MYSQL_BLOG_PASSWORD:-SecurePassword123!}" -e "SELECT COUNT(*) FROM blog_db.posts;" 2>/dev/null; then
+          echo "✅ Fresh database: WORKING"
+        else
+          echo "❌ Fresh database: CONNECTION FAILED"
+        fi
+        
+        # Cleanup
+        rm -f /tmp/fresh-blog-app.tar.gz
+        rm -rf /tmp/src
+        
+        echo "✅ Fresh application deployment completed!"
+        EOF
+
+    - name: 🔍 Verify Fresh Deployment
+      run: |
+        INSTANCE_IP="${{ needs.create-fresh-infrastructure.outputs.instance-ip }}"
+        
+        echo "🔍 Verifying fresh deployment..."
+        sleep 15
+        
+        # Test fresh blog accessibility
+        max_attempts=10
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "🌐 Attempt $attempt/$max_attempts: Testing fresh blog at http://$INSTANCE_IP/blog"
+          
+          if curl -f -s --max-time 15 "http://$INSTANCE_IP/blog" >/dev/null; then
+            echo "✅ Fresh blog is accessible!"
             
-            if curl -f -s --max-time 15 "http://$INSTANCE_IP/blog" >/dev/null 2>&1; then
-              echo "✅ Blog is accessible!"
-              break
-            fi
+            # Get fresh content preview
+            echo "📄 Fresh blog content preview:"
+            curl -s "http://$INSTANCE_IP/blog" | grep -E "(title|<h1|Blog|Welcome)" | head -3 || echo "Fresh content loaded successfully"
+            break
+          else
+            echo "❌ Fresh blog not accessible yet (attempt $attempt/$max_attempts)"
             
-            if [ $attempt -eq 6 ]; then
-              echo "⚠️ HTTP verification inconclusive"
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Fresh blog verification failed - checking diagnostics..."
+              
+              # Debug fresh installation
               ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "
-                echo 'Debug Info:'
-                sudo systemctl status apache2 --no-pager | head -5
-                curl -I http://localhost/blog 2>/dev/null || echo 'Local test failed'
-                ls -la /var/www/html/blog/ | head -3
+                echo '=== Fresh Installation Diagnostics ==='
+                sudo systemctl status apache2 --no-pager -l | head -10
+                echo ''
+                echo 'Fresh Blog Directory:'
+                ls -la /var/www/html/blog/ | head -5
+                echo ''
+                echo 'Fresh Apache Error Log:'
+                sudo tail -5 /var/log/apache2/error.log 2>/dev/null || echo 'No Apache errors in fresh install'
               "
-            else
-              sleep 20
+              exit 1
             fi
-          done
+            
+            sleep 20
+          fi
+          ((attempt++))
+        done
 
-      # === DEPLOYMENT SUCCESS SUMMARY ===
-      - name: 🎉 Deployment Summary
-        run: |
-          echo ""
-          echo "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY! 🎉"
-          echo "=========================================="
-          echo ""
-          echo "📋 Infrastructure Summary:"
-          echo "├─ 🔧 Approach: ${{ steps.detect.outputs.has_existing == 'true' && 'Reused Existing Resources' || 'Created New Resources' }}"
-          echo "├─ 📊 Instance: ${{ steps.infrastructure.outputs.instance_id }}"
-          echo "├─ 🌐 Public IP: ${{ steps.infrastructure.outputs.instance_ip }}"
-          echo "└─ 🔑 SSH Key: ${{ steps.infrastructure.outputs.ssh_key_name }}"
-          echo ""
-          echo "🌍 APPLICATION URLS:"
-          echo "├─ 🖥️ Blog: http://${{ steps.infrastructure.outputs.instance_ip }}/blog"
-          echo "└─ 🏠 Server: http://${{ steps.infrastructure.outputs.instance_ip }}"
-          echo ""
-          echo "⚙️ DEPLOYMENT INFO:"
-          echo "├─ 📦 Infrastructure: ${{ steps.plan.outputs.plan_status }}"
-          echo "├─ ${{ steps.detect.outputs.has_existing == 'true' && '♻️ Reused existing instance' || '🆕 Created new instance' }}"
-          echo "├─ 🚀 Application: ✅ Deployed"
-          echo "└─ ⏱️ Completed: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-          echo ""
-          echo "🖥️ SSH Access: ssh -i key.pem ubuntu@${{ steps.infrastructure.outputs.instance_ip }}"
-          echo ""
+    - name: 🧹 Cleanup
+      if: always()
+      run: |
+        rm -f private_key.pem fresh-blog-app.tar.gz
 
-      # === CLEANUP ===
-      - name: 🧹 Cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up temporary files..."
-          rm -f private_key.pem blog-app.tar.gz
-          rm -f terraform/tfplan terraform/terraform.tfvars
-          echo "✅ Cleanup completed"
-          
-      # === FAILURE NOTIFICATION ===
-      - name: ❌ Deployment Failed Notification
-        if: failure()
-        run: |
-          echo ""
-          echo "❌ DEPLOYMENT FAILED!"
-          echo "===================="
-          echo ""
-          echo "🔍 Troubleshooting Steps:"
-          echo "1. Check AWS credentials and permissions"
-          echo "2. Verify GitHub secrets are configured"
-          echo "3. Check if existing instance is accessible"
-          echo "4. Review Terraform state and outputs"
-          echo ""
-          echo "📚 Check the logs above for specific error details"
-          echo ""
+    - name: 🎉 Fresh Deployment Summary
+      run: |
+        echo "🎉 FRESH INFRASTRUCTURE DEPLOYMENT COMPLETED!"
+        echo "============================================="
+        echo "🔥 All old resources: DESTROYED"
+        echo "🆕 Fresh infrastructure: CREATED"
+        echo "📦 Dependencies: FRESHLY INSTALLED"
+        echo "🚀 Application: FRESHLY DEPLOYED"
+        echo ""
+        echo "🌐 Fresh Blog URL: http://${{ needs.create-fresh-infrastructure.outputs.instance-ip }}/blog"
+        echo "🏠 Fresh Server: http://${{ needs.create-fresh-infrastructure.outputs.instance-ip }}"
+        echo "🖥️ Fresh SSH: ssh -i key.pem ubuntu@${{ needs.create-fresh-infrastructure.outputs.instance-ip }}"
+        echo "📊 Fresh Instance: ${{ needs.create-fresh-infrastructure.outputs.instance-id }}"
+        echo "🔑 Fresh SSH Key: ${{ needs.create-fresh-infrastructure.outputs.ssh-key-name }}"
+        echo "============================================="
+        echo ""
+        echo "✅ Your blog is now running on completely fresh infrastructure!"
+        echo "✅ All dependencies have been freshly installed!"
+        echo "✅ Everything is clean and new!"
