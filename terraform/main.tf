@@ -18,9 +18,9 @@ provider "aws" {
   region = var.aws_region
 }
 
-# Use specific Ubuntu 22.04 LTS AMI for eu-west-1
+# Use specific Ubuntu 22.04 LTS AMI for eu-west-1 (x86_64 architecture)
 locals {
-  ubuntu_ami_id = "ami-041202be9aa6b3e08"
+  ubuntu_ami_id = "ami-0c1c30571d2dae5c9"  # Ubuntu 22.04 LTS x86_64
 }
 
 # Create VPC
