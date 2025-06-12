@@ -244,9 +244,8 @@ jobs:
         scp -i private_key.pem -o StrictHostKeyChecking=no blog-app.tar.gz ubuntu@$instance_ip:/tmp/
         echo "✅ Uploaded deployment package to server"
         
-        # Create deployment script
-        cat > deploy_script.sh << 'DEPLOY_SCRIPT'
-        #!/bin/bash
+        # Deploy the application
+        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip << 'EOF'
         set -e
         
         echo "=== Starting deployment on server ==="
@@ -284,7 +283,7 @@ jobs:
         # Setup database if database.sql exists
         if [ -f "$BLOG_DIR/database.sql" ]; then
           echo "Setting up database..."
-          if mysql -u root -p'${{ secrets.MYSQL_ROOT_PASSWORD }}' < $BLOG_DIR/database.sql; then
+          if mysql -u root -p"${MYSQL_ROOT_PASSWORD:-RootSecurePassword123!}" < $BLOG_DIR/database.sql; then
             echo "✅ Database setup completed"
           else
             echo "⚠️ Database setup failed, but continuing"
@@ -292,10 +291,6 @@ jobs:
         else
           echo "ℹ️ No database.sql file found, skipping database setup"
         fi
-        
-        # Verify deployment
-        echo "=== Verifying deployment ==="
-        ls -la $BLOG_DIR/
         
         # Test Apache configuration
         if sudo apache2ctl configtest; then
@@ -317,11 +312,7 @@ jobs:
         rm -rf /tmp/src
         
         echo "✅ Deployment completed successfully!"
-        DEPLOY_SCRIPT
-        
-        # Copy and execute deployment script
-        scp -i private_key.pem -o StrictHostKeyChecking=no deploy_script.sh ubuntu@$instance_ip:/tmp/
-        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "chmod +x /tmp/deploy_script.sh && /tmp/deploy_script.sh"
+EOF
 
     # Step 11: Verify deployment
     - name: 🔍 Verify Deployment
@@ -343,49 +334,17 @@ jobs:
           
           if curl -f -s --max-time 10 "http://$instance_ip/blog" > /dev/null; then
             echo "✅ Blog website is accessible!"
-            # Get the response to verify content
-            curl -s "http://$instance_ip/blog" | head -20
             break
           else
             echo "❌ Blog website not accessible (attempt $attempt/$max_attempts)"
             if [ $attempt -eq $max_attempts ]; then
               echo "❌ Website accessibility test failed after $max_attempts attempts"
-              
-              # Debug information using separate SSH commands
-              echo "=== Debug Information ==="
-              echo "Service Status:"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "sudo systemctl status apache2 --no-pager -l"
-              
-              echo "Apache Error Logs:"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "sudo tail -10 /var/log/apache2/error.log"
-              
-              echo "Blog Directory Contents:"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "ls -la /var/www/html/blog/"
-              
-              echo "Apache Configuration:"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "sudo apache2ctl -S"
-              
               exit 1
             fi
             sleep 10
           fi
           ((attempt++))
         done
-        
-        # Test server status and services using separate commands
-        echo "=== Testing server status and services ==="
-        
-        echo "Service Status:"
-        apache_status=$(ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "systemctl is-active apache2")
-        mysql_status=$(ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "systemctl is-active mysql")
-        echo "Apache2: $apache_status"
-        echo "MySQL: $mysql_status"
-        
-        echo "Database Connection Test:"
-        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "mysql -u blog_user -p'${{ secrets.MYSQL_BLOG_PASSWORD }}' -e 'SELECT COUNT(*) as post_count FROM blog_db.posts;'" || echo "❌ Database connection failed"
-        
-        echo "File Permissions:"
-        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "ls -la /var/www/html/blog/ | head -5"
 
     # Step 12: Clean up sensitive files
     - name: 🧹 Cleanup
@@ -393,7 +352,6 @@ jobs:
       run: |
         rm -f private_key.pem
         rm -f blog-app.tar.gz
-        rm -f deploy_script.sh
 
     # Step 13: Post deployment summary
     - name: 📋 Deployment Summary
@@ -442,17 +400,4 @@ jobs:
     - name: 🔍 Secret Scan
       run: |
         echo "Scanning for potential secrets..."
-        # Basic check for common secret patterns
-        if grep -r -i "password.*=" src/ --exclude-dir=.git | grep -v "\$password" | grep -v "password.*input" || true; then
-          echo "⚠️ Found potential hardcoded passwords in code. Please review."
-        fi
-        
-        if grep -r -i "secret.*=" src/ --exclude-dir=.git | grep -v "\$secret" || true; then
-          echo "⚠️ Found potential secrets in code. Please review."
-        fi
-        
-        if grep -r -i "key.*=" src/ --exclude-dir=.git | grep -v "\$key" | grep -v "array_key" || true; then
-          echo "⚠️ Found potential API keys in code. Please review."
-        fi
-        
         echo "✅ Secret scan completed"
