@@ -1,53 +1,32 @@
-/**
- * Main Terraform Configuration for Simple Blog Application
- * 
- * This is the primary Terraform configuration file that:
- * - Configures the Terraform backend (S3 state storage)
- * - Sets up the AWS provider
- * - Creates the S3 bucket for state management
- * - Defines the EC2 instance and related resources
- */
+# terraform/main.tf - Updated to handle existing resources
 
-# Terraform Configuration Block
 terraform {
-  required_version = ">= 1.0" # Minimum Terraform version required
-
-  # Required providers and their versions
+  required_version = ">= 1.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0" # Use AWS provider version 5.x
+      version = "~> 5.0"
     }
     tls = {
       source  = "hashicorp/tls"
-      version = "~> 4.0" # For SSH key generation
+      version = "~> 4.0"
     }
     local = {
       source  = "hashicorp/local"
-      version = "~> 2.0" # For local file operations
+      version = "~> 2.0"
     }
   }
 
-  # Backend configuration for storing Terraform state in S3
-  # This enables team collaboration and state locking
   backend "s3" {
-    bucket = "cletusmangu-lampstack-app-terraform-state-2025" # Change this to your unique bucket name
+    bucket = "cletusmangu-lampstack-app-terraform-state-2025"
     key    = "blog-app/terraform.tfstate"
     region = "eu-west-1"
-
-    # Enable state locking using DynamoDB (optional but recommended)
-    # dynamodb_table = "terraform-state-locks"
-
-    # Enable encryption for state file
     encrypt = true
   }
 }
 
-# Configure the AWS Provider
 provider "aws" {
   region = var.aws_region
-
-  # Default tags applied to all resources
   default_tags {
     tags = {
       Environment = var.environment
@@ -57,12 +36,42 @@ provider "aws" {
   }
 }
 
-# Create S3 bucket for Terraform state storage
-# This bucket will store the Terraform state file securely
+# Data sources to check for existing resources
+data "aws_s3_bucket" "existing_state_bucket" {
+  bucket = var.terraform_state_bucket
+  count  = var.use_existing_resources ? 1 : 0
+}
+
+data "aws_vpc" "existing_vpc" {
+  count = var.use_existing_resources && var.existing_vpc_id != "" ? 1 : 0
+  id    = var.existing_vpc_id
+}
+
+data "aws_subnet" "existing_subnet" {
+  count = var.use_existing_resources && var.existing_subnet_id != "" ? 1 : 0
+  id    = var.existing_subnet_id
+}
+
+data "aws_security_group" "existing_sg" {
+  count = var.use_existing_resources && var.existing_security_group_id != "" ? 1 : 0
+  id    = var.existing_security_group_id
+}
+
+data "aws_key_pair" "existing_keypair" {
+  count    = var.use_existing_resources && var.existing_key_pair_name != "" ? 1 : 0
+  key_name = var.existing_key_pair_name
+}
+
+data "aws_instance" "existing_instance" {
+  count = var.use_existing_resources && var.existing_instance_id != "" ? 1 : 0
+  instance_id = var.existing_instance_id
+}
+
+# Create S3 bucket only if it doesn't exist
 resource "aws_s3_bucket" "terraform_state" {
+  count  = var.use_existing_resources ? 0 : 1
   bucket = var.terraform_state_bucket
 
-  # Prevent accidental deletion of this bucket
   lifecycle {
     prevent_destroy = true
   }
@@ -74,20 +83,20 @@ resource "aws_s3_bucket" "terraform_state" {
   }
 }
 
-# Enable versioning on the state bucket
-# This allows recovery from accidental state corruption
+# S3 bucket versioning (conditional)
 resource "aws_s3_bucket_versioning" "terraform_state_versioning" {
-  bucket = aws_s3_bucket.terraform_state.id
+  count  = var.use_existing_resources ? 0 : 1
+  bucket = aws_s3_bucket.terraform_state[0].id
 
   versioning_configuration {
     status = "Enabled"
   }
 }
 
-# Enable server-side encryption for the state bucket
-# This encrypts the Terraform state file at rest
+# S3 bucket encryption (conditional)
 resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_encryption" {
-  bucket = aws_s3_bucket.terraform_state.id
+  count  = var.use_existing_resources ? 0 : 1
+  bucket = aws_s3_bucket.terraform_state[0].id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -97,10 +106,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_e
   }
 }
 
-# Block public access to the state bucket
-# This prevents accidental exposure of sensitive state information
+# S3 bucket public access block (conditional)
 resource "aws_s3_bucket_public_access_block" "terraform_state_pab" {
-  bucket = aws_s3_bucket.terraform_state.id
+  count  = var.use_existing_resources ? 0 : 1
+  bucket = aws_s3_bucket.terraform_state[0].id
 
   block_public_acls       = true
   block_public_policy     = true
@@ -108,31 +117,48 @@ resource "aws_s3_bucket_public_access_block" "terraform_state_pab" {
   restrict_public_buckets = true
 }
 
-# Create the main EC2 instance for the blog application
+# Local values for resource selection
+locals {
+  # Use existing resources if specified, otherwise create new ones
+  vpc_id = var.use_existing_resources && var.existing_vpc_id != "" ? data.aws_vpc.existing_vpc[0].id : aws_vpc.blog_vpc[0].id
+  
+  subnet_id = var.use_existing_resources && var.existing_subnet_id != "" ? data.aws_subnet.existing_subnet[0].id : aws_subnet.blog_public_subnet[0].id
+  
+  security_group_id = var.use_existing_resources && var.existing_security_group_id != "" ? data.aws_security_group.existing_sg[0].id : aws_security_group.blog_web_sg[0].id
+  
+  key_pair_name = var.use_existing_resources && var.existing_key_pair_name != "" ? data.aws_key_pair.existing_keypair[0].key_name : aws_key_pair.blog_keypair[0].key_name
+  
+  # Check if we should create a new instance or use existing
+  create_new_instance = var.use_existing_resources && var.existing_instance_id != "" ? false : true
+  
+  instance_id = var.use_existing_resources && var.existing_instance_id != "" ? data.aws_instance.existing_instance[0].id : (local.create_new_instance ? aws_instance.blog_server[0].id : "")
+  
+  instance_ip = var.use_existing_resources && var.existing_instance_id != "" ? data.aws_instance.existing_instance[0].public_ip : (local.create_new_instance ? aws_eip.blog_eip[0].public_ip : "")
+}
+
+# EC2 Instance (conditional creation)
 resource "aws_instance" "blog_server" {
-  # Basic instance configuration
+  count = local.create_new_instance ? 1 : 0
+  
   ami                         = var.ami_id
   instance_type               = var.instance_type
-  key_name                    = aws_key_pair.blog_keypair.key_name
-  subnet_id                   = aws_subnet.blog_public_subnet.id
-  vpc_security_group_ids      = [aws_security_group.blog_web_sg.id]
+  key_name                    = local.key_pair_name
+  subnet_id                   = local.subnet_id
+  vpc_security_group_ids      = [local.security_group_id]
   iam_instance_profile        = aws_iam_instance_profile.blog_ec2_profile.name
   associate_public_ip_address = true
 
-  # Storage configuration
   root_block_device {
-    volume_type           = "gp3" # General Purpose SSD v3 (latest generation)
-    volume_size           = 20    # 20 GB root volume (sufficient for blog app)
-    delete_on_termination = true  # Delete volume when instance is terminated
-    encrypted             = true  # Encrypt the root volume for security
+    volume_type           = "gp3"
+    volume_size           = 20
+    delete_on_termination = true
+    encrypted             = true
 
     tags = {
       Name = "${var.instance_name}-root-volume"
     }
   }
 
-  # User data script for initial instance setup
-  # This script runs automatically when the instance first boots
   user_data = base64encode(templatefile("${path.module}/userdata.sh", {
     mysql_root_password = var.mysql_root_password
     mysql_blog_password = var.mysql_blog_password
@@ -141,7 +167,6 @@ resource "aws_instance" "blog_server" {
     environment         = var.environment
   }))
 
-  # Instance tags
   tags = {
     Name        = var.instance_name
     Environment = var.environment
@@ -150,19 +175,30 @@ resource "aws_instance" "blog_server" {
     OS          = "Ubuntu"
   }
 
-  # Ensure the instance waits for the VPC and security group to be ready
-  depends_on = [
-    aws_vpc.blog_vpc,
-    aws_security_group.blog_web_sg,
-    aws_subnet.blog_public_subnet
-  ]
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
-# Data source to get the latest Ubuntu 20.04 LTS AMI
-# This ensures we always use the most recent Ubuntu image
+# Elastic IP (conditional creation)
+resource "aws_eip" "blog_eip" {
+  count    = local.create_new_instance ? 1 : 0
+  instance = aws_instance.blog_server[0].id
+  domain   = "vpc"
+
+  depends_on = [aws_instance.blog_server]
+
+  tags = {
+    Name        = "${var.project_name}-eip"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+# Data source for Ubuntu AMI
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical (Ubuntu official)
+  owners      = ["099720109477"]
 
   filter {
     name   = "name"
@@ -173,17 +209,4 @@ data "aws_ami" "ubuntu" {
     name   = "virtualization-type"
     values = ["hvm"]
   }
-}
-
-# Local values for computed configurations
-locals {
-  # Common tags for all resources
-  common_tags = {
-    Environment = var.environment
-    Project     = var.project_name
-    ManagedBy   = "Terraform"
-  }
-
-  # Computed instance name
-  instance_name = "${var.project_name}-${var.environment}-server"
 }

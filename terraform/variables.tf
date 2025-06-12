@@ -1,9 +1,41 @@
-/**
- * Terraform Variables Configuration
- * 
- * This file defines all the input variables used throughout the Terraform configuration.
- * Variables make the infrastructure code reusable and configurable for different environments.
- */
+# terraform/variables.tf - Updated with existing resource options
+
+# Existing Resources Configuration
+variable "use_existing_resources" {
+  description = "Whether to use existing AWS resources instead of creating new ones"
+  type        = bool
+  default     = true  # Set to true to use existing resources
+}
+
+variable "existing_vpc_id" {
+  description = "ID of existing VPC to use (leave empty to create new)"
+  type        = string
+  default     = ""  # Will be determined from current infrastructure
+}
+
+variable "existing_subnet_id" {
+  description = "ID of existing subnet to use (leave empty to create new)"
+  type        = string
+  default     = ""  # Will be determined from current infrastructure
+}
+
+variable "existing_security_group_id" {
+  description = "ID of existing security group to use (leave empty to create new)"
+  type        = string
+  default     = ""  # Will be determined from current infrastructure
+}
+
+variable "existing_key_pair_name" {
+  description = "Name of existing key pair to use (leave empty to create new)"
+  type        = string
+  default     = ""  # Will be determined from current infrastructure
+}
+
+variable "existing_instance_id" {
+  description = "ID of existing EC2 instance to use (leave empty to create new)"
+  type        = string
+  default     = "i-0123456789abcdef0"  # Replace with your actual instance ID
+}
 
 # AWS Configuration Variables
 variable "aws_region" {
@@ -119,11 +151,11 @@ variable "project_name" {
 variable "allowed_ssh_cidrs" {
   description = "List of CIDR blocks allowed to SSH to the instance"
   type        = list(string)
-  default     = ["0.0.0.0/0"] # Change this to your IP for better security
+  default     = ["0.0.0.0/0"]
 }
 
 variable "allowed_http_cidrs" {
   description = "List of CIDR blocks allowed to access HTTP/HTTPS"
   type        = list(string)
-  default     = ["0.0.0.0/0"] # Allow public access to web application
+  default     = ["0.0.0.0/0"]
 }

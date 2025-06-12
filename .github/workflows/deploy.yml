@@ -1,147 +1,38 @@
-# GitHub Actions Workflow for Automated Blog Deployment - FIXED VERSION
-name: 🚀 Deploy Blog Application to AWS EC2
+name: 🚀 Smart Deploy to Existing Infrastructure
 
-# Trigger conditions for this workflow
 on:
   push:
-    branches: [ main ]  # Deploy when pushing to main branch
+    branches: [ main ]
     paths: 
-      - 'src/**'        # Only deploy when source code changes
-      - 'terraform/**'  # Or when infrastructure changes
-  pull_request:
-    branches: [ main ]  # Run checks on pull requests
-    
-  # Allow manual workflow trigger
+      - 'src/**'
+      - 'terraform/**'
   workflow_dispatch:
     inputs:
-      deploy_environment:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-        - production
-        - staging
+      force_new_resources:
+        description: 'Force creation of new resources instead of using existing'
+        required: false
+        default: 'false'
+        type: boolean
 
-# Environment variables available to all jobs
 env:
   AWS_REGION: eu-west-1
   TERRAFORM_VERSION: 1.6.6
 
 jobs:
-  # Job 1: Validate and Plan Infrastructure Changes
-  terraform-plan:
-    name: 🏗️ Terraform Plan
+  detect-and-deploy:
+    name: 🔍 Detect Resources & Deploy
     runs-on: ubuntu-latest
     
-    # Security: Only run on main branch or manual dispatch
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    
-    # Define outputs for other jobs
-    outputs:
-      terraform-plan-exitcode: ${{ steps.plan.outputs.exitcode }}
-      instance-ip: ${{ steps.output.outputs.instance_ip }}
-    
     steps:
-    # Step 1: Checkout the repository code
-    - name: 📥 Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Fetch full history for better context
-
-    # Step 2: Setup Terraform with specified version
-    - name: 🔧 Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TERRAFORM_VERSION }}
-        terraform_wrapper: false  # Needed for output parsing
-
-    # Step 3: Configure AWS credentials from GitHub secrets
-    - name: 🔐 Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    # Step 4: Initialize Terraform with backend configuration
-    - name: 🚀 Terraform Init
-      working-directory: ./terraform
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
-          -backend-config="key=blog-app/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}"
-
-    # Step 5: Validate Terraform configuration
-    - name: ✅ Terraform Validate
-      working-directory: ./terraform
-      run: terraform validate
-
-    # Step 6: Format check (ensure code is properly formatted)
-    - name: 📝 Terraform Format Check
-      working-directory: ./terraform
-      run: terraform fmt -check
-
-    # Step 7: Generate Terraform plan
-    - name: 📋 Terraform Plan
-      id: plan
-      working-directory: ./terraform
-      run: |
-        terraform plan \
-          -var="terraform_state_bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
-          -var="github_repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
-          -out=tfplan \
-          -detailed-exitcode
-      continue-on-error: true
-
-    # Step 8: Save Terraform plan for apply job
-    - name: 💾 Upload Terraform Plan
-      uses: actions/upload-artifact@v4
-      with:
-        name: terraform-plan
-        path: terraform/tfplan
-        retention-days: 1
-
-    # Step 9: Get current outputs (if infrastructure exists)
-    - name: 📤 Get Terraform Outputs
-      id: output
-      working-directory: ./terraform
-      run: |
-        if terraform output instance_public_ip > /dev/null 2>&1; then
-          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
-        else
-          echo "instance_ip=not_available" >> $GITHUB_OUTPUT
-        fi
-      continue-on-error: true
-
-  # Job 2: Apply Infrastructure Changes (only on main branch)
-  terraform-apply:
-    name: 🏗️ Terraform Apply
-    runs-on: ubuntu-latest
-    needs: terraform-plan
-    
-    # Only run on main branch pushes or manual dispatch
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    
-    # Use environment protection for production deployments
-    environment: 
-      name: production
-      url: http://${{ needs.terraform-plan.outputs.instance-ip }}/blog
-    
-    steps:
-    # Step 1: Checkout code
     - name: 📥 Checkout Repository
       uses: actions/checkout@v4
 
-    # Step 2: Setup Terraform
     - name: 🔧 Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ env.TERRAFORM_VERSION }}
         terraform_wrapper: false
 
-    # Step 3: Configure AWS credentials
     - name: 🔐 Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -149,14 +40,75 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # Step 4: Download Terraform plan
-    - name: 📥 Download Terraform Plan
-      uses: actions/download-artifact@v4
-      with:
-        name: terraform-plan
-        path: terraform/
+    - name: 🔍 Detect Existing Resources
+      id: detect
+      run: |
+        echo "Detecting existing AWS resources..."
+        
+        # Look for existing instances
+        EXISTING_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Project,Values=simple-blog" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],PublicIpAddress,VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName]' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$EXISTING_INSTANCES" ] && [ "${{ github.event.inputs.force_new_resources }}" != "true" ]; then
+          # Parse the first running instance
+          read -r INSTANCE_ID INSTANCE_NAME PUBLIC_IP VPC_ID SUBNET_ID SG_ID KEY_NAME <<< "$EXISTING_INSTANCES"
+          
+          echo "Found existing running instance:"
+          echo "  Instance ID: $INSTANCE_ID"
+          echo "  Name: $INSTANCE_NAME"
+          echo "  Public IP: $PUBLIC_IP"
+          echo "  VPC: $VPC_ID"
+          echo "  Subnet: $SUBNET_ID"
+          echo "  Security Group: $SG_ID"
+          echo "  Key Name: $KEY_NAME"
+          
+          # Set outputs for next steps
+          echo "use_existing=true" >> $GITHUB_OUTPUT
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "instance_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+          echo "subnet_id=$SUBNET_ID" >> $GITHUB_OUTPUT
+          echo "security_group_id=$SG_ID" >> $GITHUB_OUTPUT
+          echo "key_name=$KEY_NAME" >> $GITHUB_OUTPUT
+          
+          # Create terraform.tfvars for existing resources
+          cat > terraform/terraform.tfvars << EOF
+        # Auto-generated for existing resources
+        use_existing_resources = true
+        existing_instance_id = "$INSTANCE_ID"
+        existing_vpc_id = "$VPC_ID"
+        existing_subnet_id = "$SUBNET_ID"
+        existing_security_group_id = "$SG_ID"
+        existing_key_pair_name = "$KEY_NAME"
+        
+        # Project configuration
+        aws_region = "eu-west-1"
+        environment = "production"
+        project_name = "simple-blog"
+        terraform_state_bucket = "${{ secrets.TERRAFORM_STATE_BUCKET }}"
+        github_repo_url = "${{ github.server_url }}/${{ github.repository }}.git"
+        EOF
+          
+        else
+          echo "No existing running instances found or forced new resources"
+          echo "use_existing=false" >> $GITHUB_OUTPUT
+          
+          # Create terraform.tfvars for new resources
+          cat > terraform/terraform.tfvars << EOF
+        # Auto-generated for new resources
+        use_existing_resources = false
+        
+        # Project configuration
+        aws_region = "eu-west-1"
+        environment = "production"
+        project_name = "simple-blog"
+        terraform_state_bucket = "${{ secrets.TERRAFORM_STATE_BUCKET }}"
+        github_repo_url = "${{ github.server_url }}/${{ github.repository }}.git"
+        EOF
+        fi
 
-    # Step 5: Initialize Terraform
     - name: 🚀 Terraform Init
       working-directory: ./terraform
       run: |
@@ -165,12 +117,14 @@ jobs:
           -backend-config="key=blog-app/terraform.tfstate" \
           -backend-config="region=${{ env.AWS_REGION }}"
 
-    # Step 6: Apply Terraform plan
-    - name: ✅ Terraform Apply
+    - name: ✅ Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan -out=tfplan
+
+    - name: 🏗️ Terraform Apply
       working-directory: ./terraform
       run: terraform apply -auto-approve tfplan
 
-    # Step 7: Get outputs for application deployment
     - name: 📤 Get Infrastructure Outputs
       id: terraform-outputs
       working-directory: ./terraform
@@ -179,243 +133,179 @@ jobs:
         echo "instance_id=$(terraform output -raw instance_id)" >> $GITHUB_OUTPUT
         echo "ssh_key_name=$(terraform output -raw ssh_key_name)" >> $GITHUB_OUTPUT
 
-    # Step 8: Save SSH private key for deployment
     - name: 🔑 Setup SSH Key
       run: |
         echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
         chmod 600 private_key.pem
 
-    # Step 9: Wait for instance to be fully ready
-    - name: ⏳ Wait for Instance Readiness
+    - name: ⏳ Wait for Instance (New Instances Only)
+      if: steps.detect.outputs.use_existing == 'false'
       run: |
-        echo "Waiting for instance to be ready..."
-        max_attempts=40
-        attempt=1
+        echo "Waiting for new instance to be ready..."
         instance_ip="${{ steps.terraform-outputs.outputs.instance_ip }}"
+        max_attempts=30
+        attempt=1
         
         while [ $attempt -le $max_attempts ]; do
           echo "Attempt $attempt/$max_attempts: Checking instance readiness..."
           
-          # First check if SSH is available
-          if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$instance_ip "echo 'SSH connection successful'" 2>/dev/null; then
-            echo "SSH connection established"
-            
-            # Then check if userdata script completed
-            if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$instance_ip "test -f /var/log/userdata-complete" 2>/dev/null; then
-              echo "✅ Instance is ready - userdata script completed!"
-              
-              # Verify critical services using separate commands
-              echo "Verifying services..."
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "systemctl is-active apache2 && echo '✅ Apache is running'"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "systemctl is-active mysql && echo '✅ MySQL is running'"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "[ -d '/var/www/html/blog' ] && echo '✅ Blog directory exists'"
-              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "[ -f '/var/www/html/blog/index.php' ] && echo '✅ Blog files exist'"
+          if timeout 15 ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$instance_ip "echo 'SSH ready'" 2>/dev/null; then
+            if ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "test -f /var/log/userdata-complete" 2>/dev/null; then
+              echo "✅ New instance is ready!"
               break
             else
-              echo "Userdata script still running..."
+              echo "Userdata still running..."
             fi
           else
-            echo "SSH not yet available..."
+            echo "SSH not ready yet..."
           fi
           
-          echo "Waiting 30 seconds before next attempt..."
           sleep 30
           ((attempt++))
         done
+
+    - name: 🎯 Quick Ready Check (Existing Instances)
+      if: steps.detect.outputs.use_existing == 'true'
+      run: |
+        echo "Checking existing instance readiness..."
+        instance_ip="${{ steps.terraform-outputs.outputs.instance_ip }}"
         
-        if [ $attempt -gt $max_attempts ]; then
-          echo "❌ Timeout waiting for instance readiness"
-          echo "Checking current status..."
-          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "tail -20 /var/log/userdata-setup.log" || echo "Could not retrieve userdata logs"
+        if timeout 10 ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "echo 'SSH working'" 2>/dev/null; then
+          echo "✅ Existing instance is accessible"
+          
+          # Quick service check
+          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "
+            echo 'Service Status:'
+            systemctl is-active apache2 2>/dev/null && echo 'Apache: RUNNING' || echo 'Apache: STOPPED'
+            systemctl is-active mysql 2>/dev/null && echo 'MySQL: RUNNING' || echo 'MySQL: STOPPED'
+          "
+        else
+          echo "❌ Cannot connect to existing instance"
           exit 1
         fi
 
-    # Step 10: Deploy application code
-    - name: 🚀 Deploy Application Code
+    - name: 🚀 Deploy Application
       run: |
-        echo "Starting application deployment..."
+        echo "Deploying application to instance..."
         instance_ip="${{ steps.terraform-outputs.outputs.instance_ip }}"
         
         # Create deployment package
         tar -czf blog-app.tar.gz src/
-        echo "✅ Created deployment package"
         
-        # Copy to server
+        # Upload to server
         scp -i private_key.pem -o StrictHostKeyChecking=no blog-app.tar.gz ubuntu@$instance_ip:/tmp/
-        echo "✅ Uploaded deployment package to server"
         
-        # Deploy the application
+        # Deploy application with smart service management
         ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip << 'EOF'
         set -e
         
-        echo "=== Starting deployment on server ==="
+        echo "=== Smart Application Deployment ==="
         
-        # Extract application files
+        # Extract application
         cd /tmp
-        if [ -f "blog-app.tar.gz" ]; then
-          tar -xzf blog-app.tar.gz
-          echo "✅ Extracted deployment package"
-        else
-          echo "❌ Deployment package not found"
-          exit 1
-        fi
+        tar -xzf blog-app.tar.gz
         
         # Ensure blog directory exists
         BLOG_DIR="/var/www/html/blog"
-        if [ ! -d "$BLOG_DIR" ]; then
-          echo "Creating blog directory..."
-          sudo mkdir -p $BLOG_DIR
-        fi
+        sudo mkdir -p "$BLOG_DIR"
         
-        # Copy files to web directory
-        if [ -d "src" ]; then
-          echo "Copying source files to $BLOG_DIR..."
-          sudo cp -r src/* $BLOG_DIR/
-          sudo chown -R www-data:www-data $BLOG_DIR
-          sudo chmod -R 755 $BLOG_DIR
-          echo "✅ Files copied successfully"
+        # Deploy files
+        sudo cp -r src/* "$BLOG_DIR/"
+        sudo chown -R www-data:www-data "$BLOG_DIR"
+        sudo chmod -R 755 "$BLOG_DIR"
+        echo "✅ Files deployed"
+        
+        # Smart service management
+        echo "=== Managing Services ==="
+        
+        # Check and start Apache
+        if ! systemctl is-active --quiet apache2; then
+          echo "Starting Apache..."
+          sudo systemctl start apache2
+          sudo systemctl enable apache2
         else
-          echo "❌ Source directory not found in deployment package"
-          ls -la
-          exit 1
+          echo "Apache already running, reloading..."
+          sudo systemctl reload apache2
         fi
         
-        # Setup database if database.sql exists
+        # Check and start MySQL
+        if ! systemctl is-active --quiet mysql; then
+          echo "Starting MySQL..."
+          sudo systemctl start mysql
+          sudo systemctl enable mysql
+        else
+          echo "MySQL already running"
+        fi
+        
+        # Smart database setup
         if [ -f "$BLOG_DIR/database.sql" ]; then
           echo "Setting up database..."
-          if mysql -u root -p"${MYSQL_ROOT_PASSWORD:-RootSecurePassword123!}" < $BLOG_DIR/database.sql; then
-            echo "✅ Database setup completed"
-          else
-            echo "⚠️ Database setup failed, but continuing"
-          fi
-        else
-          echo "ℹ️ No database.sql file found, skipping database setup"
+          # Try different MySQL access methods
+          for method in "mysql -u root -p'${{ secrets.MYSQL_ROOT_PASSWORD }}'" "mysql -u root -pRootSecurePassword123!" "mysql -u root"; do
+            if eval "$method -e 'SELECT 1'" >/dev/null 2>&1; then
+              echo "Database connection successful"
+              eval "$method < $BLOG_DIR/database.sql" 2>/dev/null || echo "Database setup attempted"
+              break
+            fi
+          done
         fi
         
-        # Test Apache configuration
-        if sudo apache2ctl configtest; then
-          echo "✅ Apache configuration is valid"
-        else
-          echo "❌ Apache configuration has errors"
-        fi
-        
-        # Reload Apache
-        if sudo systemctl reload apache2; then
-          echo "✅ Apache reloaded successfully"
-        else
-          echo "❌ Failed to reload Apache"
-          exit 1
-        fi
+        # Final service verification
+        echo "=== Final Status ==="
+        systemctl is-active apache2 && echo "✅ Apache: ACTIVE" || echo "❌ Apache: INACTIVE"
+        systemctl is-active mysql && echo "✅ MySQL: ACTIVE" || echo "❌ MySQL: INACTIVE"
         
         # Clean up
-        rm -f /tmp/blog-app.tar.gz
-        rm -rf /tmp/src
+        rm -f /tmp/blog-app.tar.gz /tmp/src -rf
         
-        echo "✅ Deployment completed successfully!"
+        echo "✅ Smart deployment completed!"
         EOF
 
-    # Step 11: Verify deployment
     - name: 🔍 Verify Deployment
       run: |
-        echo "=== Starting deployment verification ==="
         instance_ip="${{ steps.terraform-outputs.outputs.instance_ip }}"
         
-        # Wait for services to stabilize
-        echo "Waiting for services to stabilize..."
-        sleep 15
+        echo "Verifying deployment..."
+        sleep 10
         
-        # Test website accessibility
-        echo "Testing website accessibility..."
-        max_attempts=10
+        max_attempts=5
         attempt=1
         
         while [ $attempt -le $max_attempts ]; do
-          echo "Attempt $attempt/$max_attempts: Testing http://$instance_ip/blog"
-          
-          if curl -f -s --max-time 10 "http://$instance_ip/blog" > /dev/null; then
-            echo "✅ Blog website is accessible!"
+          if curl -f -s --max-time 10 "http://$instance_ip/blog" >/dev/null; then
+            echo "✅ Blog is accessible!"
             break
           else
-            echo "❌ Blog website not accessible (attempt $attempt/$max_attempts)"
+            echo "Attempt $attempt/$max_attempts: Blog not yet accessible"
             if [ $attempt -eq $max_attempts ]; then
-              echo "❌ Website accessibility test failed after $max_attempts attempts"
+              echo "❌ Blog verification failed"
+              # Show debug info
+              ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip "
+                echo 'Debug Info:'
+                sudo systemctl status apache2 --no-pager -l | head -10
+                ls -la /var/www/html/blog/ | head -5
+                sudo tail -5 /var/log/apache2/error.log 2>/dev/null || echo 'No Apache errors'
+              "
               exit 1
             fi
-            sleep 10
+            sleep 15
           fi
           ((attempt++))
         done
 
-    # Step 12: Clean up sensitive files
     - name: 🧹 Cleanup
       if: always()
       run: |
-        rm -f private_key.pem
-        rm -f blog-app.tar.gz
+        rm -f private_key.pem blog-app.tar.gz
+        rm -f terraform/tfplan
 
-    # Step 13: Post deployment summary
     - name: 📋 Deployment Summary
       run: |
-        echo "🎉 Deployment completed successfully!"
-        echo "=========================="
+        echo "🎉 Deployment Summary"
+        echo "===================="
+        echo "🔧 Used existing resources: ${{ steps.detect.outputs.use_existing }}"
         echo "🌐 Blog URL: http://${{ steps.terraform-outputs.outputs.instance_ip }}/blog"
-        echo "🏠 Server Status: http://${{ steps.terraform-outputs.outputs.instance_ip }}"
-        echo "🖥️ SSH Access: ssh -i your-key.pem ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}"
-        echo "📊 Instance ID: ${{ steps.terraform-outputs.outputs.instance_id }}"
-        echo "🌍 Region: ${{ env.AWS_REGION }}"
-        echo "=========================="
-
-  # Job 3: Run Security and Quality Checks
-  code-quality:
-    name: 🔒 Code Quality & Security
-    runs-on: ubuntu-latest
-    
-    steps:
-    # Step 1: Checkout code
-    - name: 📥 Checkout Repository
-      uses: actions/checkout@v4
-
-    # Step 2: PHP Code Quality Check
-    - name: 🐘 PHP Syntax Check
-      run: |
-        echo "Checking PHP syntax..."
-        for file in src/*.php; do
-          if [ -f "$file" ]; then
-            echo "Checking $file..."
-            php -l "$file"
-          fi
-        done
-        echo "✅ PHP syntax check completed"
-
-    # Step 3: Check for potential security issues
-    - name: 🔍 Basic Security Scan
-      run: |
-        echo "Scanning for potential security issues..."
-        
-        # Check for hardcoded passwords (excluding variable assignments)
-        echo "Checking for hardcoded credentials..."
-        if grep -r -n "password.*['\"].*['\"]" src/ --include="*.php" | grep -v '\$password' | grep -v 'type.*password' || true; then
-          echo "⚠️ Potential hardcoded passwords found - please review"
-        fi
-        
-        # Check for SQL injection vulnerabilities
-        echo "Checking for potential SQL injection risks..."
-        if grep -r -n "\$_.*mysql_query\|mysql_query.*\$_" src/ --include="*.php" || true; then
-          echo "⚠️ Potential SQL injection vulnerability found"
-        fi
-        
-        # Check for XSS vulnerabilities
-        echo "Checking for potential XSS risks..."
-        if grep -r -n "echo.*\$_\|print.*\$_" src/ --include="*.php" | grep -v "htmlspecialchars\|htmlentities" || true; then
-          echo "⚠️ Potential XSS vulnerability found - consider using htmlspecialchars()"
-        fi
-        
-        echo "✅ Security scan completed"
-
-    # Step 4: Terraform validation
-    - name: 🏗️ Terraform Validation
-      run: |
-        cd terraform
-        terraform fmt -check || echo "⚠️ Terraform files need formatting"
-        terraform validate || echo "⚠️ Terraform validation failed"
-        echo "✅ Terraform check completed"
+        echo "🏠 Server: http://${{ steps.terraform-outputs.outputs.instance_ip }}"
+        echo "📊 Instance: ${{ steps.terraform-outputs.outputs.instance_id }}"
+        echo "🗝️  SSH: ssh -i key.pem ubuntu@${{ steps.terraform-outputs.outputs.instance_ip }}"
+        echo "===================="

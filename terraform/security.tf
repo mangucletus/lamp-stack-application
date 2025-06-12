@@ -1,17 +1,10 @@
-/**
- * Security Configuration
- * 
- * This file creates all security-related resources:
- * - Security groups (firewall rules)
- * - Key pairs for SSH access
- * - IAM roles and policies (if needed for future enhancements)
- */
+# terraform/security.tf - Updated to handle existing resources
 
-# Create Key Pair for SSH access
-# This generates an SSH key pair for secure instance access
+# Create Key Pair only if not using existing one
 resource "aws_key_pair" "blog_keypair" {
+  count      = var.use_existing_resources && var.existing_key_pair_name != "" ? 0 : 1
   key_name   = var.key_pair_name
-  public_key = tls_private_key.blog_private_key.public_key_openssh
+  public_key = tls_private_key.blog_private_key[0].public_key_openssh
 
   tags = {
     Name        = "${var.project_name}-keypair"
@@ -20,33 +13,29 @@ resource "aws_key_pair" "blog_keypair" {
   }
 }
 
-# Generate private key for SSH access
-# This creates the actual SSH key pair
+# Generate private key only if not using existing key pair
 resource "tls_private_key" "blog_private_key" {
+  count     = var.use_existing_resources && var.existing_key_pair_name != "" ? 0 : 1
   algorithm = "RSA"
-  rsa_bits  = 4096 # Use 4096 bits for better security
+  rsa_bits  = 4096
 }
 
-# Save private key to local file (for development purposes)
-# In production, consider using AWS Systems Manager Parameter Store
+# Save private key to local file only if creating new key pair
 resource "local_file" "private_key" {
-  content  = tls_private_key.blog_private_key.private_key_pem
-  filename = "${var.key_pair_name}.pem"
-
-  # Set restrictive file permissions for security
+  count           = var.use_existing_resources && var.existing_key_pair_name != "" ? 0 : 1
+  content         = tls_private_key.blog_private_key[0].private_key_pem
+  filename        = "${var.key_pair_name}.pem"
   file_permission = "0600"
 }
 
-# Create Security Group for Web Server
-# This acts as a virtual firewall controlling inbound and outbound traffic
+# Create Security Group only if not using existing one
 resource "aws_security_group" "blog_web_sg" {
+  count       = var.use_existing_resources && var.existing_security_group_id != "" ? 0 : 1
   name_prefix = "${var.project_name}-web-sg"
   description = "Security group for blog web server"
-  vpc_id      = aws_vpc.blog_vpc.id
+  vpc_id      = local.vpc_id
 
-  # Inbound Rules (Ingress)
-
-  # Allow HTTP traffic (port 80) from specified CIDR blocks
+  # Inbound Rules
   ingress {
     description = "HTTP access for web application"
     from_port   = 80
@@ -55,7 +44,6 @@ resource "aws_security_group" "blog_web_sg" {
     cidr_blocks = var.allowed_http_cidrs
   }
 
-  # Allow HTTPS traffic (port 443) for future SSL implementation
   ingress {
     description = "HTTPS access for secure web application"
     from_port   = 443
@@ -64,7 +52,6 @@ resource "aws_security_group" "blog_web_sg" {
     cidr_blocks = var.allowed_http_cidrs
   }
 
-  # Allow SSH access (port 22) for server management
   ingress {
     description = "SSH access for server administration"
     from_port   = 22
@@ -73,14 +60,12 @@ resource "aws_security_group" "blog_web_sg" {
     cidr_blocks = var.allowed_ssh_cidrs
   }
 
-  # Outbound Rules (Egress)
-
-  # Allow all outbound traffic (needed for package installation and updates)
+  # Outbound Rules
   egress {
     description = "All outbound traffic"
     from_port   = 0
     to_port     = 0
-    protocol    = "-1" # -1 means all protocols
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -91,12 +76,10 @@ resource "aws_security_group" "blog_web_sg" {
   }
 }
 
-# Optional: Create IAM role for EC2 instance (for future AWS service access)
-# This allows the EC2 instance to interact with other AWS services securely
+# IAM role for EC2 instance (always create as it's lightweight)
 resource "aws_iam_role" "blog_ec2_role" {
   name = "${var.project_name}-ec2-role"
 
-  # Trust policy allowing EC2 to assume this role
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -118,7 +101,6 @@ resource "aws_iam_role" "blog_ec2_role" {
 }
 
 # Create instance profile for the IAM role
-# This allows the EC2 instance to use the IAM role
 resource "aws_iam_instance_profile" "blog_ec2_profile" {
   name = "${var.project_name}-ec2-profile"
   role = aws_iam_role.blog_ec2_role.name
@@ -130,13 +112,11 @@ resource "aws_iam_instance_profile" "blog_ec2_profile" {
   }
 }
 
-# Optional: Attach policies to the IAM role for specific AWS service access
-# Example: CloudWatch logs, S3 access, etc.
+# IAM policy for EC2 instance
 resource "aws_iam_role_policy" "blog_ec2_policy" {
   name = "${var.project_name}-ec2-policy"
   role = aws_iam_role.blog_ec2_role.id
 
-  # Policy allowing CloudWatch logs (for application monitoring)
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
