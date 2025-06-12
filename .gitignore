@@ -1,32 +1,43 @@
-# Terraform files
+# Terraform
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
 .terraform/
+.terraform.lock.hcl
 terraform.tfplan
-terraform.tar.gz
-.terraformrc
+terraform.tfplan.json
 
-# SSH Keys
-*.pem
-*.key
-id_rsa*
-
-# AWS credentials
+# AWS
 .aws/
-*.credentials
 
-# Environment files
-.env
-.env.local
-.env.production
-
-# Logs
-*.log
-logs/
-
-# IDE files
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Private keys
+*.pem
+*.key
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.backup
+*.bak
+
+# Temporary files
+tmp/
+temp/
