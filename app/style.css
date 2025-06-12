@@ -1,92 +1,149 @@
+/* === GLOBAL STYLES === */
 * {
     margin: 0;
+    /* Remove default margin from all elements */
     padding: 0;
+    /* Remove default padding from all elements */
     box-sizing: border-box;
+    /* Includes padding and border in element's total width and height */
 }
 
+/* Body layout and typography */
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    /* Font fallback list */
     line-height: 1.6;
+    /* Improves readability by increasing line spacing */
     color: #333;
+    /* Default text color (dark gray) */
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    /* Diagonal gradient background */
     min-height: 100vh;
+    /* Ensures body takes at least full viewport height */
     padding: 20px;
+    /* Adds spacing around the content */
 }
 
+/* === MAIN CONTAINER === */
 .container {
     max-width: 800px;
+    /* Restricts width for readability */
     margin: 0 auto;
+    /* Horizontally centers the container */
     background: rgba(255, 255, 255, 0.95);
+    /* Slightly transparent white background */
     border-radius: 15px;
+    /* Rounded corners */
     box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+    /* Soft outer shadow for depth */
     overflow: hidden;
+    /* Hides content that spills outside */
     backdrop-filter: blur(10px);
+    /* Adds a blur effect behind the container (for glassmorphism) */
 }
 
+/* === HEADER SECTION === */
 header {
     background: linear-gradient(135deg, #4CAF50, #45a049);
+    /* Green gradient background */
     color: white;
+    /* White text */
     padding: 30px;
+    /* Inner spacing */
     text-align: center;
+    /* Centered content */
 }
 
 header h1 {
     font-size: 2.5em;
+    /* Large heading size */
     margin-bottom: 10px;
+    /* Spacing below heading */
     font-weight: 700;
+    /* Bold text */
 }
 
 header p {
     font-size: 1.1em;
+    /* Slightly larger paragraph */
     opacity: 0.9;
+    /* Slightly transparent */
 }
 
+/* === TASK INPUT FORM === */
 .add-task-form {
     padding: 30px;
+    /* Inner padding */
     background: #f8f9fa;
+    /* Light gray background */
     border-bottom: 1px solid #e9ecef;
+    /* Subtle bottom border */
 }
 
 .add-task-form form {
     display: flex;
+    /* Arrange inputs in a row */
     gap: 15px;
+    /* Space between inputs */
     align-items: center;
+    /* Align vertically */
 }
 
 .add-task-form input[type="text"] {
     flex: 1;
+    /* Expands to fill available space */
     padding: 15px 20px;
+    /* Padding inside input */
     border: 2px solid #ddd;
+    /* Light gray border */
     border-radius: 10px;
+    /* Rounded corners */
     font-size: 16px;
+    /* Font size */
     transition: all 0.3s ease;
+    /* Smooth hover/focus effects */
     background: white;
+    /* Input background */
 }
 
 .add-task-form input[type="text"]:focus {
     outline: none;
+    /* Remove default browser focus style */
     border-color: #4CAF50;
+    /* Green border on focus */
     box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.1);
+    /* Green glow around input */
 }
 
 .add-task-form button {
     padding: 15px 30px;
+    /* Size of button */
     background: linear-gradient(135deg, #4CAF50, #45a049);
+    /* Green gradient */
     color: white;
+    /* White text */
     border: none;
+    /* No border */
     border-radius: 10px;
+    /* Rounded corners */
     font-size: 16px;
     font-weight: 600;
     cursor: pointer;
+    /* Pointer cursor on hover */
     transition: all 0.3s ease;
+    /* Smooth transitions */
     white-space: nowrap;
+    /* Prevents button text from wrapping */
 }
 
 .add-task-form button:hover {
     transform: translateY(-2px);
+    /* Slight lift effect */
     box-shadow: 0 5px 15px rgba(76, 175, 80, 0.3);
+    /* Soft shadow */
 }
 
+/* === TASK DISPLAY AREA === */
 .tasks-container {
     padding: 30px;
 }
@@ -100,8 +157,10 @@ header p {
 
 .task-list {
     list-style: none;
+    /* Remove bullet points */
 }
 
+/* === INDIVIDUAL TASK ITEM === */
 .task-item {
     background: white;
     margin-bottom: 15px;
@@ -109,19 +168,25 @@ header p {
     border-radius: 10px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
     display: flex;
+    /* Arrange content in row */
     justify-content: space-between;
+    /* Space between content and actions */
     align-items: center;
     border-left: 4px solid #4CAF50;
+    /* Green vertical accent */
     transition: all 0.3s ease;
 }
 
 .task-item:hover {
     transform: translateY(-2px);
+    /* Lift on hover */
     box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+    /* Stronger shadow */
 }
 
 .task-content {
     flex: 1;
+    /* Fills remaining space */
 }
 
 .task-text {
@@ -135,14 +200,17 @@ header p {
 .task-date {
     color: #666;
     font-size: 0.9em;
+    /* Smaller text */
 }
 
 .task-actions {
     margin-left: 20px;
 }
 
+/* === DELETE BUTTON === */
 .delete-btn {
     background: linear-gradient(135deg, #ff4757, #ff3742);
+    /* Red gradient */
     color: white;
     padding: 8px 16px;
     text-decoration: none;
@@ -154,9 +222,12 @@ header p {
 
 .delete-btn:hover {
     transform: translateY(-1px);
+    /* Slight lift */
     box-shadow: 0 3px 10px rgba(255, 71, 87, 0.3);
+    /* Red glow */
 }
 
+/* === NO TASK MESSAGE === */
 .no-tasks {
     text-align: center;
     padding: 60px 20px;
@@ -168,6 +239,7 @@ header p {
     font-weight: 500;
 }
 
+/* === FOOTER === */
 footer {
     background: #f8f9fa;
     padding: 20px;
@@ -176,7 +248,7 @@ footer {
     border-top: 1px solid #e9ecef;
 }
 
-/* Responsive Design */
+/* === RESPONSIVE STYLES FOR SMALL SCREENS === */
 @media (max-width: 768px) {
     .container {
         margin: 10px;
@@ -197,12 +269,14 @@ footer {
 
     .add-task-form form {
         flex-direction: column;
+        /* Stack form fields vertically */
         gap: 10px;
     }
 
     .add-task-form input[type="text"],
     .add-task-form button {
         width: 100%;
+        /* Full width for smaller screens */
         padding: 12px 15px;
     }
 
@@ -222,7 +296,7 @@ footer {
     }
 }
 
-/* Success/Error Messages */
+/* === FEEDBACK MESSAGES === */
 .message {
     padding: 15px;
     margin: 20px 30px;
@@ -232,12 +306,16 @@ footer {
 
 .success {
     background: #d4edda;
+    /* Light green background */
     color: #155724;
+    /* Dark green text */
     border: 1px solid #c3e6cb;
 }
 
 .error {
     background: #f8d7da;
+    /* Light red background */
     color: #721c24;
+    /* Dark red text */
     border: 1px solid #f5c6cb;
 }

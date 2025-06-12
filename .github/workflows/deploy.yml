@@ -1,58 +1,62 @@
+# GitHub Actions workflow to deploy a LAMP Stack application on AWS EC2 using Terraform
+
 name: Deploy LAMP Stack Application
 
+# Triggers the workflow when code is pushed or a pull request is opened on the 'main' branch
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
 
+# Environment variables shared across all jobs
 env:
-  AWS_REGION: eu-west-1
-  TF_VERSION: 1.5.0
-  DEPLOYMENT_BUCKET: lamp-deployment-cletusmangu-1749764715
+  AWS_REGION: eu-west-1                         # AWS region to deploy the infrastructure
+  TF_VERSION: 1.5.0                             # Terraform version to use
+  DEPLOYMENT_BUCKET: lamp-deployment-cletusmangu-1749764715 # S3 bucket for any deployment artifacts if needed
 
 jobs:
   terraform:
     name: 'Terraform'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest                     # Run this job on the latest Ubuntu GitHub-hosted runner
     outputs:
-      instance_ip: ${{ steps.terraform-output.outputs.instance_ip }}
+      instance_ip: ${{ steps.terraform-output.outputs.instance_ip }}  # Pass EC2 public IP to the next job
     
     defaults:
       run:
         shell: bash
-        working-directory: ./terraform
+        working-directory: ./terraform         # All shell commands will run inside the ./terraform directory
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4                # Checks out your repo so the workflow can access the code
 
     - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v3       # Official action to set up Terraform in the runner
       with:
-        terraform_version: ${{ env.TF_VERSION }}
+        terraform_version: ${{ env.TF_VERSION }} # Use the version defined in the environment variable
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}             # Retrieved from GitHub Secrets
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Terraform Init
-      run: terraform init
+      run: terraform init                      # Initializes the Terraform configuration directory
 
     - name: Terraform Validate
-      run: terraform validate
+      run: terraform validate                  # Validates the Terraform syntax and configuration
 
     - name: Terraform Plan
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request'  # Only runs on PRs to show the proposed changes
       run: |
         terraform plan -var="public_key=${{ secrets.EC2_PUBLIC_KEY }}" -no-color
-      continue-on-error: true
+      continue-on-error: true                  # Prevents PRs from failing due to plan issues
 
     - name: Terraform Apply
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push' # Only apply on main branch push
       run: |
         terraform apply -var="public_key=${{ secrets.EC2_PUBLIC_KEY }}" -auto-approve
 
@@ -61,16 +65,17 @@ jobs:
       id: terraform-output
       run: |
         echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
-
+        # Extracts EC2 public IP and makes it available for the next job via 'needs'
+  
   deploy:
     name: 'Deploy Application'
-    runs-on: ubuntu-latest
-    needs: terraform
+    runs-on: ubuntu-latest                     # Another job on Ubuntu runner
+    needs: terraform                           # Depends on the 'terraform' job to complete successfully
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4                # Pulls down the latest repo contents
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -82,18 +87,18 @@ jobs:
     - name: Wait for EC2 instance to be ready
       run: |
         echo "Waiting for EC2 instance to be fully initialized..."
-        sleep 180
+        sleep 180  # Allows time for the EC2 instance to run user_data.sh and fully configure itself
 
     - name: Deploy via SSH
       env:
-        PRIVATE_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
-        INSTANCE_IP: ${{ needs.terraform.outputs.instance_ip }}
+        PRIVATE_KEY: ${{ secrets.EC2_PRIVATE_KEY }}              # Private key to SSH into EC2
+        INSTANCE_IP: ${{ needs.terraform.outputs.instance_ip }}  # IP from previous job output
       run: |
-        # Save private key to file
+        # Save the private key to a PEM file
         echo "$PRIVATE_KEY" > private_key.pem
-        chmod 600 private_key.pem
+        chmod 600 private_key.pem  # Restrict permissions so SSH doesn't complain
         
-        # Wait for SSH to be available
+        # Retry logic for establishing SSH connection (up to 30 tries)
         echo "Waiting for SSH connection to $INSTANCE_IP..."
         for i in {1..30}; do
           if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$INSTANCE_IP "echo 'SSH connection successful'"; then
@@ -104,35 +109,38 @@ jobs:
           sleep 15
         done
         
-        # Deploy application files
+        # Copy application files from the local repo to the EC2 instance
         echo "Deploying application files..."
         scp -i private_key.pem -o StrictHostKeyChecking=no -r app/* ubuntu@$INSTANCE_IP:/tmp/
         
-        # Move files to web directory and set permissions
+        # Connect to EC2 and finalize deployment
         echo "Setting up web application..."
         ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "
-          # Wait for user data script to complete
+          # Wait for LAMP stack setup to complete
           while [ ! -f /var/log/cloud-init-output.log ] || ! grep -q 'LAMP Stack installation completed' /var/log/cloud-init-output.log; do
             echo 'Waiting for LAMP stack installation to complete...'
             sleep 30
           done
           
-          # Deploy application files
+          # Move the PHP/CSS files to Apache's document root
           sudo cp /tmp/*.php /tmp/*.css /var/www/html/ 2>/dev/null || echo 'Some files may not exist, continuing...'
+          
+          # Set correct permissions
           sudo chown -R www-data:www-data /var/www/html/
           sudo chmod -R 755 /var/www/html/
           
-          # Restart services
+          # Restart Apache and MySQL services
           sudo systemctl restart apache2
           sudo systemctl restart mysql
           
-          # Verify application
+          # Confirm files are in place
           echo 'Application deployment completed!'
           ls -la /var/www/html/
         "
         
-        # Clean up
+        # Clean up local PEM file
         rm -f private_key.pem
         
+        # Final deployment success message
         echo "🎉 Application deployed successfully!"
         echo "🌐 Access your application at: http://$INSTANCE_IP"
