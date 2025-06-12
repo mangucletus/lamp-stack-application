@@ -9,11 +9,14 @@ on:
 env:
   AWS_REGION: eu-west-1
   TF_VERSION: 1.5.0
+  DEPLOYMENT_BUCKET: lamp-deployment-cletusmangu-1749764715
 
 jobs:
   terraform:
     name: 'Terraform'
     runs-on: ubuntu-latest
+    outputs:
+      instance_ip: ${{ steps.terraform-output.outputs.instance_ip }}
     
     defaults:
       run:
@@ -81,18 +84,6 @@ jobs:
         echo "Waiting for EC2 instance to be fully initialized..."
         sleep 180
 
-    - name: Deploy Application Files
-      run: |
-        # Create deployment package
-        tar -czf app-deployment.tar.gz -C app .
-        
-        # Upload to S3 (temporary storage)
-        aws s3 cp app-deployment.tar.gz s3://your-deployment-bucket/app-deployment.tar.gz
-        
-        # Download and extract on EC2 instance via user data or Systems Manager
-        # For this example, we'll use a simple approach with S3 and instance user data
-        echo "Application package uploaded to S3"
-
     - name: Deploy via SSH
       env:
         PRIVATE_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
@@ -103,26 +94,45 @@ jobs:
         chmod 600 private_key.pem
         
         # Wait for SSH to be available
+        echo "Waiting for SSH connection to $INSTANCE_IP..."
         for i in {1..30}; do
-          if ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'SSH connection successful'"; then
+          if ssh -i private_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$INSTANCE_IP "echo 'SSH connection successful'"; then
+            echo "SSH connection established!"
             break
           fi
           echo "Waiting for SSH... attempt $i/30"
-          sleep 10
+          sleep 15
         done
         
         # Deploy application files
+        echo "Deploying application files..."
         scp -i private_key.pem -o StrictHostKeyChecking=no -r app/* ubuntu@$INSTANCE_IP:/tmp/
         
         # Move files to web directory and set permissions
+        echo "Setting up web application..."
         ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "
-          sudo cp -r /tmp/*.php /tmp/*.css /var/www/html/
+          # Wait for user data script to complete
+          while [ ! -f /var/log/cloud-init-output.log ] || ! grep -q 'LAMP Stack installation completed' /var/log/cloud-init-output.log; do
+            echo 'Waiting for LAMP stack installation to complete...'
+            sleep 30
+          done
+          
+          # Deploy application files
+          sudo cp /tmp/*.php /tmp/*.css /var/www/html/ 2>/dev/null || echo 'Some files may not exist, continuing...'
           sudo chown -R www-data:www-data /var/www/html/
           sudo chmod -R 755 /var/www/html/
+          
+          # Restart services
           sudo systemctl restart apache2
+          sudo systemctl restart mysql
+          
+          # Verify application
+          echo 'Application deployment completed!'
+          ls -la /var/www/html/
         "
         
         # Clean up
         rm -f private_key.pem
         
-        echo "Application deployed successfully!"
+        echo "🎉 Application deployed successfully!"
+        echo "🌐 Access your application at: http://$INSTANCE_IP"

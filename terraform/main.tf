@@ -13,12 +13,37 @@ terraform {
   }
 }
 
-# Configure the AWS Provider
-provider "aws" {
-  region = var.aws_region
-}
+# # Configure the AWS Provider
+# provider "aws" {
+#   region = var.aws_region
+# }
 
-# Use specific Ubuntu 22.04 LTS AMI for eu-west-1 (x86_64 architecture)
+# # Get the latest Ubuntu 22.04 LTS AMI
+# data "aws_ami" "ubuntu" {
+#   most_recent = true
+#   owners      = ["099720109477"] # Canonical
+
+#   filter {
+#     name   = "name"
+#     values = ["ubuntu/images/hvm-ssd/ubuntu-22.04-amd64-server-*"]
+#   }
+
+#   filter {
+#     name   = "virtualization-type"
+#     values = ["hvm"]
+#   }
+
+#   filter {
+#     name   = "architecture"
+#     values = ["x86_64"]
+#   }
+
+#   filter {
+#     name   = "state"
+#     values = ["available"]
+#   }
+# }
+
 locals {
   ubuntu_ami_id = "ami-0c1c30571d2dae5c9"  # Ubuntu 22.04 LTS x86_64
 }
@@ -134,7 +159,7 @@ resource "aws_key_pair" "lamp_keypair" {
 
 # Create EC2 instance
 resource "aws_instance" "lamp_server" {
-  ami                    = local.ubuntu_ami_id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.lamp_keypair.key_name
   subnet_id              = aws_subnet.lamp_public_subnet.id
