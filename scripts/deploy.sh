@@ -1,263 +1,156 @@
 #!/bin/bash
 
-# Smart Resource Manager - Reuse existing AWS resources, start stopped instances
-# This script intelligently manages existing AWS infrastructure without recreating
+# Instance Manager - Quick script to find, start, and deploy to existing instances
+# This script specifically handles your existing instance at 54.78.153.43
 
 set -euo pipefail
-
-# Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-TERRAFORM_DIR="$PROJECT_ROOT/terraform"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
 print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-print_action() { echo -e "${CYAN}[ACTION]${NC} $1"; }
 
-# Global variables for discovered resources
-declare -g INSTANCE_ID=""
-declare -g INSTANCE_STATE=""
-declare -g INSTANCE_IP=""
-declare -g VPC_ID=""
-declare -g SUBNET_ID=""
-declare -g SECURITY_GROUP_ID=""
-declare -g KEY_NAME=""
-declare -g USE_EXISTING=false
+# Known instance IP
+KNOWN_IP="54.78.153.43"
 
-# Function to discover existing blog infrastructure
-discover_existing_infrastructure() {
-    print_status "🔍 Discovering existing blog infrastructure..."
+# Function to find instance by IP
+find_instance_by_ip() {
+    local ip="$1"
+    print_status "🔍 Finding instance with IP: $ip"
     
-    # Look for instances with our project tag
-    local instances_data=$(aws ec2 describe-instances \
-        --filters "Name=tag:Project,Values=simple-blog" \
-        --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,PrivateIpAddress,VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName,Tags[?Key==`Name`].Value|[0]]' \
+    local instance_data=$(aws ec2 describe-instances \
+        --filters "Name=ip-address,Values=$ip" \
+        --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName,Tags[?Key==`Name`].Value|[0]]' \
         --output text 2>/dev/null || echo "")
     
-    if [ -n "$instances_data" ]; then
-        print_success "Found existing blog infrastructure!"
-        echo ""
-        echo "Existing Instances:"
-        echo "-------------------"
+    if [ -n "$instance_data" ]; then
+        read -r INSTANCE_ID INSTANCE_STATE PUBLIC_IP VPC_ID SUBNET_ID SG_ID KEY_NAME INSTANCE_NAME <<< "$instance_data"
         
-        local instance_count=0
-        local selected_instance=""
+        print_success "Found instance:"
+        echo "  Instance ID: $INSTANCE_ID"
+        echo "  Name: ${INSTANCE_NAME:-Unknown}"
+        echo "  State: $INSTANCE_STATE"
+        echo "  Public IP: $PUBLIC_IP"
+        echo "  VPC: $VPC_ID"
+        echo "  Subnet: $SUBNET_ID"
+        echo "  Security Group: $SG_ID"
+        echo "  Key Pair: ${KEY_NAME:-None}"
         
-        while IFS=$'\t' read -r inst_id state pub_ip priv_ip vpc subnet sg key name; do
-            if [ -n "$inst_id" ]; then
-                ((instance_count++))
-                echo "[$instance_count] Instance: $inst_id ($name)"
-                echo "    State: $state"
-                echo "    Public IP: ${pub_ip:-"None"}"
-                echo "    Private IP: $priv_ip"
-                echo "    VPC: $vpc"
-                echo "    Subnet: $subnet"
-                echo "    Security Group: $sg"
-                echo "    Key Pair: ${key:-"None"}"
-                echo ""
-                
-                # Prefer running instances, then stopped instances
-                if [ "$state" = "running" ] && [ -z "$selected_instance" ]; then
-                    selected_instance="$inst_id|$state|$pub_ip|$priv_ip|$vpc|$subnet|$sg|$key|$name"
-                elif [ "$state" = "stopped" ] && [ -z "$selected_instance" ]; then
-                    selected_instance="$inst_id|$state|$pub_ip|$priv_ip|$vpc|$subnet|$sg|$key|$name"
-                fi
-            fi
-        done <<< "$instances_data"
-        
-        if [ -n "$selected_instance" ]; then
-            IFS='|' read -r INSTANCE_ID INSTANCE_STATE INSTANCE_IP priv_ip VPC_ID SUBNET_ID SECURITY_GROUP_ID KEY_NAME inst_name <<< "$selected_instance"
-            
-            print_success "Selected instance: $INSTANCE_ID ($inst_name) - State: $INSTANCE_STATE"
-            USE_EXISTING=true
-            
-            return 0
-        fi
-    fi
-    
-    print_warning "No existing blog instances found"
-    USE_EXISTING=false
-    return 1
-}
-
-# Function to start stopped EC2 instance
-start_stopped_instance() {
-    local instance_id="$1"
-    
-    print_action "🚀 Starting stopped instance: $instance_id"
-    
-    # Start the instance
-    aws ec2 start-instances --instance-ids "$instance_id" >/dev/null
-    
-    print_status "Waiting for instance to start..."
-    
-    # Wait for instance to be running
-    local max_attempts=20
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        local state=$(aws ec2 describe-instances \
-            --instance-ids "$instance_id" \
-            --query 'Reservations[0].Instances[0].State.Name' \
-            --output text)
-        
-        echo "Attempt $attempt/$max_attempts: Instance state is '$state'"
-        
-        if [ "$state" = "running" ]; then
-            print_success "✅ Instance is now running!"
-            
-            # Get the new public IP
-            INSTANCE_IP=$(aws ec2 describe-instances \
-                --instance-ids "$instance_id" \
-                --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                --output text)
-            
-            if [ "$INSTANCE_IP" = "None" ] || [ -z "$INSTANCE_IP" ]; then
-                print_warning "Instance has no public IP, checking for Elastic IP..."
-                # Check if there's an associated Elastic IP
-                local eip=$(aws ec2 describe-addresses \
-                    --filters "Name=instance-id,Values=$instance_id" \
-                    --query 'Addresses[0].PublicIp' \
-                    --output text 2>/dev/null || echo "None")
-                
-                if [ "$eip" != "None" ] && [ -n "$eip" ]; then
-                    INSTANCE_IP="$eip"
-                    print_success "Found associated Elastic IP: $INSTANCE_IP"
-                else
-                    print_warning "No public IP available. Instance may be in private subnet."
-                    INSTANCE_IP=""
-                fi
-            else
-                print_success "Instance public IP: $INSTANCE_IP"
-            fi
-            
-            INSTANCE_STATE="running"
-            return 0
-        fi
-        
-        sleep 15
-        ((attempt++))
-    done
-    
-    print_error "Timeout waiting for instance to start"
-    return 1
-}
-
-# Function to ensure instance is running
-ensure_instance_running() {
-    if [ -z "$INSTANCE_ID" ]; then
-        print_error "No instance ID available"
+        return 0
+    else
+        print_error "No instance found with IP: $ip"
         return 1
     fi
+}
+
+# Function to start instance if stopped
+start_instance_if_needed() {
+    local instance_id="$1"
+    local current_state="$2"
     
-    print_status "🔄 Ensuring instance $INSTANCE_ID is running..."
-    
-    case "$INSTANCE_STATE" in
+    case "$current_state" in
         "running")
             print_success "Instance is already running"
-            if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" = "None" ]; then
-                # Get current IP
-                INSTANCE_IP=$(aws ec2 describe-instances \
-                    --instance-ids "$INSTANCE_ID" \
-                    --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                    --output text)
-                print_status "Current public IP: ${INSTANCE_IP:-"None"}"
-            fi
+            return 0
             ;;
         "stopped")
-            start_stopped_instance "$INSTANCE_ID"
+            print_status "🚀 Starting stopped instance..."
+            aws ec2 start-instances --instance-ids "$instance_id"
+            
+            print_status "⏳ Waiting for instance to start..."
+            local max_wait=300  # 5 minutes
+            local elapsed=0
+            
+            while [ $elapsed -lt $max_wait ]; do
+                local state=$(aws ec2 describe-instances \
+                    --instance-ids "$instance_id" \
+                    --query 'Reservations[0].Instances[0].State.Name' \
+                    --output text)
+                
+                echo "Current state: $state (${elapsed}s elapsed)"
+                
+                if [ "$state" = "running" ]; then
+                    print_success "✅ Instance started successfully!"
+                    return 0
+                fi
+                
+                sleep 15
+                elapsed=$((elapsed + 15))
+            done
+            
+            print_error "Timeout waiting for instance to start"
+            return 1
             ;;
         "stopping")
-            print_action "Instance is stopping, waiting for it to stop completely..."
-            aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
-            start_stopped_instance "$INSTANCE_ID"
+            print_status "Instance is stopping, waiting for it to stop first..."
+            aws ec2 wait instance-stopped --instance-ids "$instance_id"
+            start_instance_if_needed "$instance_id" "stopped"
             ;;
-        "pending"|"rebooting")
-            print_action "Instance is $INSTANCE_STATE, waiting for it to be running..."
-            aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-            INSTANCE_STATE="running"
-            print_success "Instance is now running"
+        "pending")
+            print_status "Instance is already starting, waiting..."
+            aws ec2 wait instance-running --instance-ids "$instance_id"
+            print_success "✅ Instance is now running!"
+            return 0
             ;;
         *)
-            print_error "Instance is in unsupported state: $INSTANCE_STATE"
+            print_error "Instance is in unsupported state: $current_state"
             return 1
             ;;
     esac
-    
-    return 0
 }
 
-# Function to discover other existing resources
-discover_existing_network_resources() {
-    if [ -z "$VPC_ID" ] || [ -z "$SUBNET_ID" ] || [ -z "$SECURITY_GROUP_ID" ]; then
-        print_status "🔍 Discovering additional network resources..."
-        
-        # If we have an instance, get its network details
-        if [ -n "$INSTANCE_ID" ]; then
-            local instance_details=$(aws ec2 describe-instances \
-                --instance-ids "$INSTANCE_ID" \
-                --query 'Reservations[0].Instances[0].[VpcId,SubnetId,SecurityGroups[0].GroupId,KeyName]' \
-                --output text)
-            
-            read -r VPC_ID SUBNET_ID SECURITY_GROUP_ID KEY_NAME <<< "$instance_details"
-            print_success "Retrieved network details from existing instance"
-        fi
-    fi
-    
-    print_status "Network configuration:"
-    echo "  VPC ID: ${VPC_ID:-"Not found"}"
-    echo "  Subnet ID: ${SUBNET_ID:-"Not found"}"
-    echo "  Security Group ID: ${SECURITY_GROUP_ID:-"Not found"}"
-    echo "  Key Pair: ${KEY_NAME:-"Not found"}"
-}
-
-# Function to create terraform.tfvars for existing resources
+# Function to create terraform config for existing instance
 create_terraform_config() {
+    local instance_id="$1"
+    local vpc_id="$2"
+    local subnet_id="$3"
+    local sg_id="$4"
+    local key_name="$5"
+    
     print_status "📝 Creating Terraform configuration for existing resources..."
     
-    local tfvars_file="$TERRAFORM_DIR/terraform.tfvars"
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local terraform_dir="$(dirname "$script_dir")/terraform"
+    local tfvars_file="$terraform_dir/terraform.tfvars"
     
     cat > "$tfvars_file" << EOF
-# Auto-generated terraform.tfvars for existing resources
-# Generated on: $(date)
-# Instance State: $INSTANCE_STATE -> running
+# Auto-generated terraform.tfvars for existing instance
+# Generated: $(date)
+# Instance: $instance_id
 
-# Use existing resources configuration
+# Use existing resources
 use_existing_resources = true
 
 # Existing resource IDs
-existing_instance_id = "$INSTANCE_ID"
-existing_vpc_id = "$VPC_ID"
-existing_subnet_id = "$SUBNET_ID"
-existing_security_group_id = "$SECURITY_GROUP_ID"
-existing_key_pair_name = "$KEY_NAME"
+existing_instance_id = "$instance_id"
+existing_vpc_id = "$vpc_id"
+existing_subnet_id = "$subnet_id"
+existing_security_group_id = "$sg_id"
+existing_key_pair_name = "$key_name"
 
 # Project configuration
 aws_region = "eu-west-1"
-environment = "production" 
+environment = "production"
 project_name = "simple-blog"
 terraform_state_bucket = "cletusmangu-lampstack-app-terraform-state-2025"
 
-# Database passwords (using defaults, override in secrets)
+# Database passwords (override in GitHub secrets if needed)
 mysql_root_password = "RootSecurePassword123!"
 mysql_blog_password = "SecurePassword123!"
 
-# Network configuration (for reference)
+# Network configuration
 vpc_cidr = "10.0.0.0/16"
 public_subnet_cidr = "10.0.1.0/24"
 availability_zone = "eu-west-1a"
 
-# Security configuration  
+# Security configuration
 allowed_ssh_cidrs = ["0.0.0.0/0"]
 allowed_http_cidrs = ["0.0.0.0/0"]
 EOF
@@ -265,132 +158,105 @@ EOF
     print_success "Terraform configuration created: $tfvars_file"
 }
 
-# Function to run Terraform with existing resources
-run_terraform_with_existing() {
-    print_status "🏗️ Running Terraform with existing resources..."
-    
-    cd "$TERRAFORM_DIR"
-    
-    # Initialize Terraform
-    print_action "Initializing Terraform..."
-    terraform init -reconfigure
-    
-    # Import existing resources if needed (this prevents conflicts)
-    print_action "Checking Terraform state..."
-    
-    # Plan with existing resources
-    print_action "Creating Terraform plan..."
-    if terraform plan -out=tfplan; then
-        print_success "Terraform plan created successfully"
-    else
-        print_error "Terraform planning failed"
-        return 1
-    fi
-    
-    # Apply the plan
-    print_action "Applying Terraform configuration..."
-    if terraform apply -auto-approve tfplan; then
-        print_success "Terraform applied successfully"
-    else
-        print_error "Terraform apply failed"
-        return 1
-    fi
-    
-    # Get outputs
-    print_status "Getting Terraform outputs..."
-    local tf_instance_ip=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
-    local tf_instance_id=$(terraform output -raw instance_id 2>/dev/null || echo "")
-    
-    if [ -n "$tf_instance_ip" ]; then
-        INSTANCE_IP="$tf_instance_ip"
-        print_success "Terraform outputs retrieved successfully"
-    fi
-    
-    rm -f tfplan
-    return 0
-}
-
-# Function to wait for SSH connectivity
-wait_for_ssh() {
+# Function to test SSH connectivity
+test_ssh_connection() {
     local instance_ip="$1"
-    local ssh_key="$2"
+    local key_name="$2"
     
-    if [ -z "$instance_ip" ]; then
-        print_error "No instance IP provided for SSH check"
+    print_status "🔌 Testing SSH connectivity..."
+    
+    # Find SSH key file
+    local ssh_key=""
+    for key_file in "${key_name}.pem" "$HOME/.ssh/${key_name}.pem" "$HOME/.ssh/${key_name}"; do
+        if [ -f "$key_file" ]; then
+            ssh_key="$key_file"
+            chmod 600 "$ssh_key"
+            break
+        fi
+    done
+    
+    if [ -z "$ssh_key" ]; then
+        print_warning "SSH key file not found for: $key_name"
+        print_status "Please ensure you have the SSH key file available"
+        print_status "Expected locations:"
+        echo "  - ${key_name}.pem"
+        echo "  - $HOME/.ssh/${key_name}.pem"
+        echo "  - $HOME/.ssh/${key_name}"
         return 1
     fi
     
-    print_status "🔌 Waiting for SSH connectivity to $instance_ip..."
+    print_status "Using SSH key: $ssh_key"
     
-    local max_attempts=15
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        echo "Attempt $attempt/$max_attempts: Testing SSH connection..."
+    # Test connection
+    local max_attempts=5
+    for attempt in $(seq 1 $max_attempts); do
+        echo "SSH attempt $attempt/$max_attempts..."
         
         if timeout 10 ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@"$instance_ip" "echo 'SSH connection successful'" 2>/dev/null; then
             print_success "✅ SSH connection established!"
             return 0
         fi
         
-        sleep 10
-        ((attempt++))
+        if [ $attempt -lt $max_attempts ]; then
+            sleep 10
+        fi
     done
     
-    print_error "SSH connection failed after $max_attempts attempts"
+    print_error "SSH connection failed"
+    print_status "Possible issues:"
+    echo "  - Security group doesn't allow SSH on port 22"
+    echo "  - Instance might be in a private subnet"
+    echo "  - SSH key mismatch"
+    echo "  - Instance still starting services"
     return 1
 }
 
-# Function to deploy application to existing instance
-deploy_to_existing_instance() {
+# Function to deploy application
+deploy_application() {
     local instance_ip="$1"
     local key_name="$2"
     
-    print_status "🚀 Deploying application to existing instance..."
+    print_status "🚀 Deploying application to $instance_ip..."
     
-    # Find SSH key file
-    local ssh_key_file=""
-    for key_file in "$TERRAFORM_DIR/${key_name}.pem" "$HOME/.ssh/${key_name}.pem" "$HOME/.ssh/${key_name}" "${key_name}.pem"; do
+    # Find SSH key
+    local ssh_key=""
+    for key_file in "${key_name}.pem" "$HOME/.ssh/${key_name}.pem" "$HOME/.ssh/${key_name}"; do
         if [ -f "$key_file" ]; then
-            ssh_key_file="$key_file"
-            chmod 600 "$ssh_key_file"
+            ssh_key="$key_file"
+            chmod 600 "$ssh_key"
             break
         fi
     done
     
-    if [ -z "$ssh_key_file" ]; then
-        print_error "SSH key file not found for key: $key_name"
-        print_status "Please ensure SSH key is available or configure GitHub secrets"
+    if [ -z "$ssh_key" ]; then
+        print_error "SSH key file not found"
         return 1
     fi
     
-    print_success "Using SSH key: $ssh_key_file"
-    
-    # Wait for SSH
-    if ! wait_for_ssh "$instance_ip" "$ssh_key_file"; then
-        return 1
-    fi
+    # Get script directory and project root
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local project_root="$(dirname "$script_dir")"
     
     # Create deployment package
-    print_action "Creating deployment package..."
-    cd "$PROJECT_ROOT"
+    print_status "📦 Creating deployment package..."
+    cd "$project_root"
     tar -czf "/tmp/blog-deployment.tar.gz" src/
     
-    # Upload deployment package
-    print_action "Uploading application files..."
-    if ! scp -i "$ssh_key_file" -o StrictHostKeyChecking=no "/tmp/blog-deployment.tar.gz" ubuntu@"$instance_ip":/tmp/; then
+    # Upload package
+    print_status "📤 Uploading application..."
+    if ! scp -i "$ssh_key" -o StrictHostKeyChecking=no "/tmp/blog-deployment.tar.gz" ubuntu@"$instance_ip":/tmp/; then
         print_error "Failed to upload deployment package"
         return 1
     fi
     
-    # Deploy application with smart service management
-    print_action "Deploying application with smart service management..."
-    ssh -i "$ssh_key_file" -o StrictHostKeyChecking=no ubuntu@"$instance_ip" << 'EOF'
+    # Deploy application
+    print_status "🎯 Deploying application..."
+    ssh -i "$ssh_key" -o StrictHostKeyChecking=no ubuntu@"$instance_ip" << 'EOF'
 set -e
 
-echo "=== Smart Application Deployment ==="
+echo "=== Application Deployment Started ==="
 
-# Extract application files
+# Extract deployment package
 cd /tmp
 if [ -f "blog-deployment.tar.gz" ]; then
     tar -xzf blog-deployment.tar.gz
@@ -400,250 +266,235 @@ else
     exit 1
 fi
 
-# Ensure web directory exists
+# Ensure blog directory exists
 BLOG_DIR="/var/www/html/blog"
 sudo mkdir -p "$BLOG_DIR"
 
-# Deploy application files
+# Deploy files
 if [ -d "src" ]; then
-    echo "📁 Deploying files to $BLOG_DIR..."
+    echo "📁 Copying files to $BLOG_DIR..."
     sudo cp -r src/* "$BLOG_DIR/"
     sudo chown -R www-data:www-data "$BLOG_DIR"
     sudo chmod -R 755 "$BLOG_DIR"
-    echo "✅ Application files deployed"
+    echo "✅ Files deployed successfully"
 else
     echo "❌ Source directory not found"
     exit 1
 fi
 
-# Smart service management
-echo "=== Smart Service Management ==="
-
-# Check if Apache is installed and start if needed
+# Check and manage Apache
+echo "🌐 Checking Apache service..."
 if command -v apache2 >/dev/null 2>&1; then
-    if ! systemctl is-active --quiet apache2; then
+    if systemctl is-active --quiet apache2; then
+        echo "🔄 Apache is running, reloading configuration..."
+        sudo systemctl reload apache2
+    else
         echo "🚀 Starting Apache..."
         sudo systemctl start apache2
         sudo systemctl enable apache2
-    else
-        echo "🔄 Apache running, reloading configuration..."
-        sudo systemctl reload apache2
     fi
-    echo "✅ Apache: $(systemctl is-active apache2)"
+    echo "Apache status: $(systemctl is-active apache2)"
 else
-    echo "⚠️ Apache not installed on this instance"
+    echo "⚠️ Apache not installed"
 fi
 
-# Check if MySQL is installed and start if needed  
+# Check and manage MySQL
+echo "🗄️ Checking MySQL service..."
 if command -v mysql >/dev/null 2>&1; then
-    if ! systemctl is-active --quiet mysql; then
+    if systemctl is-active --quiet mysql; then
+        echo "✅ MySQL is running"
+    else
         echo "🚀 Starting MySQL..."
         sudo systemctl start mysql
         sudo systemctl enable mysql
-    else
-        echo "✅ MySQL already running"
     fi
-    echo "✅ MySQL: $(systemctl is-active mysql)"
+    echo "MySQL status: $(systemctl is-active mysql)"
     
-    # Smart database setup
+    # Setup database if SQL file exists
     if [ -f "$BLOG_DIR/database.sql" ]; then
         echo "🗄️ Setting up database..."
-        # Try multiple authentication methods
-        db_setup_success=false
         
-        for mysql_cmd in "mysql -u root -p'RootSecurePassword123!'" "mysql -u root -pRootSecurePassword123!" "mysql -u root" "sudo mysql"; do
-            if eval "$mysql_cmd -e 'SELECT 1' >/dev/null 2>&1"; then
-                echo "✅ Database connection successful with: ${mysql_cmd%% *}"
-                eval "$mysql_cmd < $BLOG_DIR/database.sql" 2>/dev/null || echo "Database setup attempted"
-                db_setup_success=true
+        # Try different authentication methods
+        for mysql_auth in \
+            "mysql -u root -pRootSecurePassword123!" \
+            "mysql -u root" \
+            "sudo mysql -u root"; do
+            
+            echo "Trying database connection..."
+            if eval "$mysql_auth -e 'SELECT 1' >/dev/null 2>&1"; then
+                echo "✅ Database connection successful"
+                eval "$mysql_auth < $BLOG_DIR/database.sql" >/dev/null 2>&1 || echo "Database setup attempted"
                 break
             fi
         done
-        
-        if [ "$db_setup_success" = false ]; then
-            echo "⚠️ Could not connect to database with any method"
-        fi
     fi
 else
-    echo "⚠️ MySQL not installed on this instance"
+    echo "⚠️ MySQL not installed"
 fi
 
 # Final verification
-echo "=== Final Service Status ==="
-command -v apache2 >/dev/null && systemctl is-active apache2 && echo "✅ Apache: ACTIVE" || echo "❌ Apache: INACTIVE"
-command -v mysql >/dev/null && systemctl is-active mysql && echo "✅ MySQL: ACTIVE" || echo "❌ MySQL: INACTIVE"
+echo "=== Final Status Check ==="
+if command -v apache2 >/dev/null; then
+    systemctl is-active --quiet apache2 && echo "✅ Apache: RUNNING" || echo "❌ Apache: NOT RUNNING"
+fi
+if command -v mysql >/dev/null; then
+    systemctl is-active --quiet mysql && echo "✅ MySQL: RUNNING" || echo "❌ MySQL: NOT RUNNING"
+fi
 
-# Check if blog files are accessible
+# Check blog files
 if [ -f "$BLOG_DIR/index.php" ]; then
     echo "✅ Blog files: DEPLOYED"
 else
-    echo "❌ Blog files: MISSING"
+    echo "❌ Blog files: NOT FOUND"
 fi
 
 # Cleanup
 rm -f /tmp/blog-deployment.tar.gz
 rm -rf /tmp/src
 
-echo "✅ Smart deployment completed!"
+echo "✅ Application deployment completed!"
 EOF
 
-    # Clean up local deployment package
+    # Clean up local package
     rm -f "/tmp/blog-deployment.tar.gz"
     
-    print_success "Application deployment completed!"
-    return 0
+    if [ $? -eq 0 ]; then
+        print_success "Application deployed successfully!"
+        return 0
+    else
+        print_error "Application deployment failed"
+        return 1
+    fi
 }
 
 # Function to verify deployment
 verify_deployment() {
     local instance_ip="$1"
     
-    if [ -z "$instance_ip" ]; then
-        print_warning "No instance IP available for verification"
-        return 1
-    fi
-    
     print_status "🔍 Verifying deployment..."
     
-    # Wait a moment for services to stabilize
+    # Test HTTP accessibility
     sleep 10
     
-    # Test blog accessibility
-    local max_attempts=5
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        echo "Attempt $attempt/$max_attempts: Testing blog accessibility..."
+    for attempt in {1..5}; do
+        echo "HTTP test attempt $attempt/5..."
         
         if curl -f -s --max-time 10 "http://$instance_ip/blog" >/dev/null 2>&1; then
             print_success "✅ Blog is accessible at: http://$instance_ip/blog"
             return 0
         fi
         
-        if [ $attempt -eq $max_attempts ]; then
-            print_warning "❌ Blog not accessible via HTTP"
-            print_status "This might be normal if:"
-            echo "  - Instance is in private subnet"
-            echo "  - Security group doesn't allow HTTP"
-            echo "  - Services need more time to start"
-            return 1
+        if [ $attempt -lt 5 ]; then
+            sleep 15
         fi
-        
-        sleep 15
-        ((attempt++))
     done
+    
+    print_warning "❌ HTTP verification failed"
+    print_status "The blog might still be working - possible reasons:"
+    echo "  - Security group blocks HTTP traffic"
+    echo "  - Apache needs more time to start"
+    echo "  - Configuration issues"
+    return 1
 }
 
 # Main function
 main() {
-    print_success "🚀 Smart AWS Resource Manager"
-    echo "============================================"
-    print_status "Intelligently managing existing AWS resources"
-    echo ""
+    print_success "🔧 Instance Manager - Quick Deploy to Existing Infrastructure"
+    echo "=============================================================="
     
-    # Check prerequisites
-    print_status "Checking prerequisites..."
-    for cmd in aws terraform ssh scp curl; do
-        if ! command -v $cmd &> /dev/null; then
-            print_error "Required command not found: $cmd"
-            exit 1
-        fi
-    done
+    # Check AWS CLI
+    if ! command -v aws >/dev/null 2>&1; then
+        print_error "AWS CLI not found"
+        exit 1
+    fi
     
     # Check AWS credentials
-    if ! aws sts get-caller-identity &> /dev/null; then
+    if ! aws sts get-caller-identity >/dev/null 2>&1; then
         print_error "AWS credentials not configured"
         exit 1
     fi
     
-    print_success "All prerequisites satisfied"
+    print_success "✅ Prerequisites satisfied"
     echo ""
     
-    # Discover existing infrastructure
-    if discover_existing_infrastructure; then
-        print_status "Using existing infrastructure approach"
+    # Find the instance
+    if find_instance_by_ip "$KNOWN_IP"; then
+        echo ""
         
-        # Ensure instance is running
-        if ensure_instance_running; then
+        # Start instance if needed
+        if start_instance_if_needed "$INSTANCE_ID" "$INSTANCE_STATE"; then
+            echo ""
             
-            # Discover network resources
-            discover_existing_network_resources
+            # Create Terraform config
+            create_terraform_config "$INSTANCE_ID" "$VPC_ID" "$SUBNET_ID" "$SG_ID" "$KEY_NAME"
+            echo ""
             
-            # Create Terraform configuration
-            create_terraform_config
+            # Get current IP (might have changed after start)
+            CURRENT_IP=$(aws ec2 describe-instances \
+                --instance-ids "$INSTANCE_ID" \
+                --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                --output text)
             
-            # Run Terraform with existing resources
-            if run_terraform_with_existing; then
-                
-                # Deploy application
-                if [ -n "$INSTANCE_IP" ] && [ -n "$KEY_NAME" ]; then
-                    if deploy_to_existing_instance "$INSTANCE_IP" "$KEY_NAME"; then
-                        
-                        # Verify deployment
-                        verify_deployment "$INSTANCE_IP"
-                        
-                        # Success summary
+            if [ "$CURRENT_IP" = "None" ]; then
+                print_warning "Instance has no public IP"
+                CURRENT_IP=""
+            fi
+            
+            # Test SSH and deploy if possible
+            if [ -n "$CURRENT_IP" ] && [ -n "$KEY_NAME" ]; then
+                if test_ssh_connection "$CURRENT_IP" "$KEY_NAME"; then
+                    echo ""
+                    
+                    if deploy_application "$CURRENT_IP" "$KEY_NAME"; then
                         echo ""
-                        print_success "🎉 Smart deployment completed successfully!"
-                        echo "============================================"
-                        echo "🏗️  Used existing instance: $INSTANCE_ID"
-                        echo "🌐 Blog URL: http://$INSTANCE_IP/blog"
-                        echo "🏠 Server: http://$INSTANCE_IP"
-                        echo "🖥️  SSH: ssh -i ${KEY_NAME}.pem ubuntu@$INSTANCE_IP"
-                        echo "============================================"
-                    else
-                        print_error "Application deployment failed"
-                        exit 1
+                        verify_deployment "$CURRENT_IP"
+                        
+                        echo ""
+                        print_success "🎉 Instance management completed!"
+                        echo "=================================="
+                        echo "🌐 Blog URL: http://$CURRENT_IP/blog"
+                        echo "🏠 Server: http://$CURRENT_IP"
+                        echo "🖥️ SSH: ssh -i ${KEY_NAME}.pem ubuntu@$CURRENT_IP"
+                        echo "📊 Instance: $INSTANCE_ID"
+                        echo "=================================="
                     fi
-                else
-                    print_error "Missing instance IP or SSH key information"
-                    exit 1
                 fi
             else
-                print_error "Terraform execution failed"
-                exit 1
+                print_warning "Cannot deploy - missing IP or SSH key information"
+                echo "Instance IP: ${CURRENT_IP:-None}"
+                echo "SSH Key: ${KEY_NAME:-None}"
             fi
-        else
-            print_error "Failed to ensure instance is running"
-            exit 1
         fi
     else
-        print_warning "No existing infrastructure found. Run with --create-new to create new resources"
+        print_error "Could not find instance with IP: $KNOWN_IP"
         echo ""
-        print_status "To create new infrastructure, please run:"
-        echo "  ./deploy.sh --create-new"
-        exit 1
+        print_status "Searching for any blog-related instances..."
+        
+        # Search for any instances with blog-related tags
+        aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=simple-blog" \
+            --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress,Tags[?Key==`Name`].Value|[0]]' \
+            --output table || echo "No instances found with Project=simple-blog tag"
     fi
 }
 
 # Handle command line arguments
 case "${1:-}" in
     --help|-h)
-        echo "Smart AWS Resource Manager"
+        echo "Instance Manager - Quick Deploy Tool"
         echo ""
-        echo "Usage: $0 [options]"
+        echo "This script:"
+        echo "  1. Finds your existing instance (IP: $KNOWN_IP)"
+        echo "  2. Starts it if stopped"
+        echo "  3. Creates Terraform config for existing resources"
+        echo "  4. Tests SSH connectivity"
+        echo "  5. Deploys your application"
+        echo "  6. Verifies the deployment"
         echo ""
-        echo "Options:"
-        echo "  --help, -h     Show this help message"
-        echo "  --create-new   Force creation of new resources"
-        echo ""
-        echo "This script intelligently manages existing AWS resources:"
-        echo "  - Discovers existing blog instances"
-        echo "  - Starts stopped instances instead of recreating"
-        echo "  - Reuses existing VPC, subnets, security groups"
-        echo "  - Deploys application to running instances"
+        echo "Usage: $0 [--help]"
         exit 0
         ;;
-    --create-new)
-        print_status "Force creation mode - will create new resources"
-        USE_EXISTING=false
-        # Here you would call the original deployment logic
-        print_warning "New resource creation not implemented in this script"
-        print_status "Please use the original deployment script for new resources"
-        exit 1
-        ;;
     "")
-        # Default behavior - smart resource management
         main
         ;;
     *)
