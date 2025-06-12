@@ -7,7 +7,7 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "lamp-stack-tfstate-cletusmangu-1749764715"  # Change this to your bucket name
+    bucket = "lamp-stack-tfstate-cletusmangu-1749764715"
     key    = "lamp-stack/terraform.tfstate"
     region = "eu-west-1"
   }
@@ -18,20 +18,9 @@ provider "aws" {
   region = var.aws_region
 }
 
-# Data source to get the latest Ubuntu AMI
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-22.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
+# Use specific Ubuntu 22.04 LTS AMI for eu-west-1
+locals {
+  ubuntu_ami_id = "ami-041202be9aa6b3e08"
 }
 
 # Create VPC
@@ -145,7 +134,7 @@ resource "aws_key_pair" "lamp_keypair" {
 
 # Create EC2 instance
 resource "aws_instance" "lamp_server" {
-  ami                    = data.aws_ami.ubuntu.id
+  ami                    = local.ubuntu_ami_id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.lamp_keypair.key_name
   subnet_id              = aws_subnet.lamp_public_subnet.id
