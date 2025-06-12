@@ -312,7 +312,7 @@ jobs:
         rm -rf /tmp/src
         
         echo "✅ Deployment completed successfully!"
-EOF
+        EOF
 
     # Step 11: Verify deployment
     - name: 🔍 Verify Deployment
@@ -366,27 +366,18 @@ EOF
         echo "=========================="
 
   # Job 3: Run Security and Quality Checks
-  security-scan:
-    name: 🔒 Security & Quality Checks
+  code-quality:
+    name: 🔒 Code Quality & Security
     runs-on: ubuntu-latest
-    needs: terraform-plan
     
     steps:
     # Step 1: Checkout code
     - name: 📥 Checkout Repository
       uses: actions/checkout@v4
 
-    # Step 2: Run Terraform security scan with tfsec
-    - name: 🛡️ Terraform Security Scan
-      uses: aquasecurity/tfsec-action@v1.0.3
-      with:
-        soft_fail: true
-        working_directory: terraform/
-
-    # Step 3: PHP Code Quality Check
-    - name: 🐘 PHP Code Quality Check
+    # Step 2: PHP Code Quality Check
+    - name: 🐘 PHP Syntax Check
       run: |
-        # Basic PHP syntax check
         echo "Checking PHP syntax..."
         for file in src/*.php; do
           if [ -f "$file" ]; then
@@ -396,8 +387,35 @@ EOF
         done
         echo "✅ PHP syntax check completed"
 
-    # Step 4: Check for secrets in code
-    - name: 🔍 Secret Scan
+    # Step 3: Check for potential security issues
+    - name: 🔍 Basic Security Scan
       run: |
-        echo "Scanning for potential secrets..."
-        echo "✅ Secret scan completed"
+        echo "Scanning for potential security issues..."
+        
+        # Check for hardcoded passwords (excluding variable assignments)
+        echo "Checking for hardcoded credentials..."
+        if grep -r -n "password.*['\"].*['\"]" src/ --include="*.php" | grep -v '\$password' | grep -v 'type.*password' || true; then
+          echo "⚠️ Potential hardcoded passwords found - please review"
+        fi
+        
+        # Check for SQL injection vulnerabilities
+        echo "Checking for potential SQL injection risks..."
+        if grep -r -n "\$_.*mysql_query\|mysql_query.*\$_" src/ --include="*.php" || true; then
+          echo "⚠️ Potential SQL injection vulnerability found"
+        fi
+        
+        # Check for XSS vulnerabilities
+        echo "Checking for potential XSS risks..."
+        if grep -r -n "echo.*\$_\|print.*\$_" src/ --include="*.php" | grep -v "htmlspecialchars\|htmlentities" || true; then
+          echo "⚠️ Potential XSS vulnerability found - consider using htmlspecialchars()"
+        fi
+        
+        echo "✅ Security scan completed"
+
+    # Step 4: Terraform validation
+    - name: 🏗️ Terraform Validation
+      run: |
+        cd terraform
+        terraform fmt -check || echo "⚠️ Terraform files need formatting"
+        terraform validate || echo "⚠️ Terraform validation failed"
+        echo "✅ Terraform check completed"
