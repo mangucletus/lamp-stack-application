@@ -115,31 +115,31 @@ graph TB
 ### **Network Architecture**
 
 ```mermaid
-graph LR
-    subgraph "Internet Gateway"
-        IGW[🌉 Internet Gateway<br/>0.0.0.0/0]
-    end
+graph TB
+    Internet[🌐 Internet] --> IGW[🌉 Internet Gateway]
     
-    subgraph "VPC: lamp-vpc (10.0.0.0/16)"
-        subgraph "Public Subnet (10.0.1.0/24)"
-            EC2[🖥️ EC2 Instance<br/>Private IP: 10.0.1.x<br/>Public IP: 54.171.64.158]
-        end
-        
-        subgraph "Security Groups"
-            SG[🔒 lamp-security-group<br/>SSH: 22<br/>HTTP: 80<br/>HTTPS: 443<br/>MySQL: 3306 (internal)]
-        end
-        
-        RT[📋 Route Table<br/>0.0.0.0/0 → IGW]
-    end
+    IGW --> VPC[🏗️ VPC: lamp-vpc<br/>10.0.0.0/16]
     
-    IGW --> EC2
-    RT --> IGW
-    SG --> EC2
+    VPC --> Subnet[📦 Public Subnet<br/>10.0.1.0/24<br/>eu-west-1a]
     
-    style IGW fill:#e3f2fd
-    style EC2 fill:#fff3e0
-    style SG fill:#ffebee
-    style RT fill:#f1f8e9
+    Subnet --> EC2[🖥️ EC2 Instance<br/>Private: 10.0.1.x<br/>Public: 54.171.64.158]
+    
+    VPC --> RT[📋 Route Table<br/>0.0.0.0/0 → IGW]
+    
+    VPC --> SG[🔒 Security Group<br/>SSH: 22<br/>HTTP: 80<br/>HTTPS: 443<br/>MySQL: 3306]
+    
+    RT -.-> Subnet
+    SG -.-> EC2
+    
+    classDef internetClass fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef vpcClass fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef instanceClass fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+    classDef securityClass fill:#ffebee,stroke:#d32f2f,stroke-width:2px
+    
+    class Internet,IGW internetClass
+    class VPC,Subnet,RT vpcClass
+    class EC2 instanceClass
+    class SG securityClass
 ```
 
 ### **Application Flow Diagram**
@@ -365,7 +365,7 @@ git push origin main
 ```
 
 ### **6. Access Your Application**
-Visit **[http://54.171.64.158/](http://54.171.64.158/)** (or your instance IP) after 5-10 minutes!
+Visit **[http://your-instance-IP/](http://your-instance-IP/)**  after 5-10 minutes!
 
 ---
 
